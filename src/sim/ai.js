@@ -115,12 +115,23 @@ export function think(npc, ctx) {
         return;
       }
     }
-    // 1b. Curiosità: rumori o fatti lievi spingono a controllare (non a fuggire).
+    // 1b. Curiosità: si va a controllare percezioni dirette (viste/sentite)
+    // e segnalazioni azionabili (dove/cosa specifici anche se sentiti dire).
+    // Due esclusioni, entrambe epistemiche:
+    // (a) già sul posto (soglia oltre l'arrivo stepToward: ogni trigger deve
+    //     produrre locomozione reale, mai un reset dwell sul posto che affama
+    //     l'agenda su stimoli persistenti);
+    // (b) impressioni vaghe di seconda mano (hearsay+suspicion): si annotano
+    //     e circolano, ma non giustificano abbandonare la routine — a
+    //     differenza di un crimine riferito con luogo preciso.
     if (npc.state !== 'alerted' && npc.state !== 'curious') {
       for (const [evId, b] of npc.beliefs) {
         if (npc.alertedBy === evId) continue;
         const conf = effectiveConfidence(b, t);
-        if (conf >= 0.25 && (b.kind === 'noise' || b.severity < REACT_SEV)) {
+        if (conf >= 0.25 && (b.kind === 'noise' || b.severity < REACT_SEV) &&
+            !(b.channel === 'hearsay' && b.kind === 'suspicion')) {
+          const dx = npc.x - b.px, dz = npc.z - b.pz;
+          if (dx * dx + dz * dz < 2.25) continue;
           npc.alertedBy = evId;
           npc.gotoX = b.px; npc.gotoZ = b.pz;
           npc.state = 'curious';
@@ -229,8 +240,11 @@ export function think(npc, ctx) {
         const from = nearestNode(npc.x, npc.z);
         npc.path = findPath(navAdj, from, step.node);
         npc.pathIdx = 0;
+        // Salto del primo nodo SOLO se entro il suo raggio di arrivo: la
+        // vecchia soglia fissa 1.5 superava gli arrivalRadius piccoli
+        // (es. 0.6) e dichiarava arrivi a 1.5m dal nodo (stallo apparente).
         const n0 = WORLD.nodes[npc.path[0]];
-        if (n0 && Math.hypot(n0.x - npc.x, n0.z - npc.z) < 1.5) npc.pathIdx = 1;
+        if (n0 && Math.hypot(n0.x - npc.x, n0.z - npc.z) < arrivalRadius(npc.path[0])) npc.pathIdx = 1;
         npc.state = 'walk';
         ctx.stats.pathComputations++;
       }
