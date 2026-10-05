@@ -459,7 +459,7 @@ export function buildStaticScene(scene) {
       // Lo zoccolo corre sotto le vetrine ma si interrompe sul vano porta.
       add(g, BX(dx - dw - (b.x - hx), 0.9, 0.14, M.plinth), (b.x - hx + dx - dw) / 2, 0.45, zS - 0.02);
       add(g, BX(b.x + hx - (dx + dw), 0.9, 0.14, M.plinth), (dx + dw + b.x + hx) / 2, 0.45, zS - 0.02);
-      const bd = doorUnit(1.4, 2.4, M.woodMid, {});
+      const bd = doorDecor(2.4, 2.4, {});
       bd.position.set(dx, 1.2, zS - 0.05);
       bd.rotation.y = Math.PI;
       g.add(bd);
@@ -471,8 +471,8 @@ export function buildStaticScene(scene) {
         const pole = CY(0.04, 0.04, 2.4, M.metal, 6);
         add(g, pole, b.x + px, 1.6, zS - 1.6);
       }
-      // porta di servizio sul retro (nord) + zona trascurata
-      const back = doorUnit(1.0, 2.1, M.metal, {});
+      // decoro porta di servizio sul retro (nord) + zona trascurata
+      const back = doorDecor(1.0, 2.1, {});
       back.position.set(b.x + 3, 1.05, zN + 0.05);
       g.add(back);
       for (const [ox, oz] of [[1.5, 1.2], [2.4, 0.9], [4.6, 1.4]]) {

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>S10 audio smoke (browser reale)</title></head>
+<body>
+<pre id="smoke-out">pending</pre>
+<script type="module">
+import { createAudioWorld } from './src/audio/manager.js';
+import { makeAudio } from './src/audio/audio.js';
+import { runAudioTests } from './src/test/audio.js';
+import { buildColliders, losBlocked } from './src/world/world.js';
+import { buildingAt, BUILDINGS } from './src/world/buildings.js';
+const errors = [];
+addEventListener('error', (e) => errors.push('err:' + String(e.message ?? e).slice(0, 120)));
+addEventListener('unhandledrejection', (e) => errors.push('rej:' + String(e.reason?.message ?? e.reason).slice(0, 120)));
+const out = {};
+try {
+  // 1. suite logica anche nel browser
+  const suite = runAudioTests();
+  out.suite = { passed: suite.passed, total: suite.total, failed: suite.tests.filter((t) => !t.pass).map((t) => t.name) };
+  // 2. gesto utente reale -> AudioContext deve partire
+  const a = makeAudio();
+  const tapped = new Promise((res) => {
+    addEventListener('pointerdown', () => res(a.ensure()), { once: true });
+    setTimeout(() => res('no-gesture'), 2000);
+  });
+  document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+  out.ensureAfterGesture = await tapped;
+  // 3. mondo reale: 110 NPC, strada -> bar -> dentro -> fuori
+  const w = createAudioWorld({
+    buildingAt: (x, z) => buildingAt(x, z),
+    buildingTypeOf: (b) => (b ? BUILDINGS[b]?.type ?? null : null),
+    roomsOf: (b) => (b ? BUILDINGS[b]?.rooms ?? null : null),
+  });
+  const npcs = [];
+  for (let i = 0; i < 110; i++) {
+    npcs.push({ id: 'syn' + i, name: 'Syn' + i, role: 'civilian', work: i % 3 ? 'bar_in' : 'svc_in', x: -24 + (i % 22), z: 8 + Math.floor(i / 22) * 3, state: 'dwell', level: i < 12 ? 'L1' : 'L2' });
+  }
+  const colliders = buildColliders();
+  w._zoneDeps.losBlocked = (ax, az, bx, bz) => losBlocked(ax, az, bx, bz, colliders);
+  const step = (dt, px, pz, simT) => w.update(dt, { player: { x: px, z: pz, yaw: 0, y: 0 }, npcs, simT, colliders, weather: 'clear' });
+  for (let i = 0; i < 200; i++) step(0.05, 37, 2, i * 0.05);           // strada
+  out.street = { zone: w.zone, ...w.snapshot().pool };
+  for (let i = 0; i < 120; i++) step(0.05, -20, 13.5, 10 + i * 0.05);  // davanti al bar
+  const near = w.snapshot();
+  for (let i = 0; i < 120; i++) step(0.05, -20, 18, 16 + i * 0.05);    // dentro
+  const inside = w.snapshot();
+  out.barTransition = { from: near.zone, to: inside.zone, insideGain: +inside.insideGain.toFixed(2) };
+  // porta + urlo + allarme
+  w.emit({ type: 'DOOR_SLAM', x: -20, z: 14, intensity: 0.9, material: 'metal' });
+  w.emit({ type: 'NPC_SCREAM', source: 'syn3', x: -19, z: 17, intensity: 0.95 });
+  for (let i = 0; i < 10; i++) step(0.05, -20, 18, 22 + i * 0.05);
+  const loud = w.snapshot();
+  out.loud = { duck: +loud.duck.toFixed(2), chains: w.vocals.stats().chains, vocals: w.vocals.stats().vocals };
+  for (let i = 0; i < 200; i++) step(0.05, 37, 2, 24 + i * 0.05);      // fuori
+  const back = w.snapshot();
+  out.backOutside = { zone: back.zone, insideGain: +back.insideGain.toFixed(2) };
+  out.scale110 = { active: back.pool.active, max: back.pool.maxVoices, bounded: back.pool.active <= back.pool.maxVoices, stolen: back.pool.stolen };
+  out.music = w.music.getState();
+  out.debugLines = w.debug.lines().length;
+  out.ctx = w.ctxState();
+  w.dispose(); a.dispose();
+  const after = w.snapshot().pool.active;
+  out.disposed = after === 0;
+  out.errors = errors;
+  out.ok = errors.length === 0 && suite.passed === suite.total && out.scale110.bounded && out.disposed;
+} catch (e) {
+  out.fatal = String(e?.stack ?? e).slice(0, 600);
+  out.errors = errors;
+}
+document.getElementById('smoke-out').textContent = JSON.stringify(out);
+console.log('[S10-SMOKE]' + JSON.stringify(out));
+</script>
+</body></html>

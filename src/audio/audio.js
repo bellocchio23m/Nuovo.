@@ -1,93 +1,75 @@
-// Audio sintetizzato WebAudio: nessun asset, parte solo dopo gesto utente.
-// Suoni: passi, fischio, colpo, clang, crollo, sting d'allarme, ambience.
-export function makeAudio() {
+// S10 — Facciata audio compatibile con il gioco esistente.
+// makeAudio() mantiene la vecchia API (step/whistle/swing/...) ma delega al
+// vero AudioWorldManager: bus, pool, spatial, zone, mixer, voci, musica.
+// Nessun asset: sintesi procedurale, parte solo dopo gesto utente.
+import { createAudioWorld } from './manager.js';
+
+export function makeAudio(opts = {}) {
+  const mgr = createAudioWorld(opts);
   const A = {
-    ctx: null, master: null, stepAt: 0,
+    _mgr: mgr,
+    get ctx() { return null; }, // legacy: il contesto è interno al manager
+    get master() { return null; },
     ensure() {
-      if (A.ctx) { if (A.ctx.state === 'suspended') A.ctx.resume(); return true; }
-      try {
-        const Ctx = window.AudioContext || window.webkitAudioContext;
-        if (!Ctx) return false;
-        A.ctx = new Ctx();
-        A.master = A.ctx.createGain();
-        A.master.gain.value = 0.25;
-        A.master.connect(A.ctx.destination);
-        A.ambience();
-      } catch { return false; }
-      return !!A.ctx;
+      const ok = mgr.ensure();
+      // in Node (test) non c'è AudioContext: true logico comunque
+      if (typeof window === 'undefined') return true;
+      return ok;
     },
+    // --- routing semantico diretto (nuova API) ---
+    emit(ev) { return mgr.emit(ev); },
+    on(type, fn) { return mgr.on(type, fn); },
+    update(dt, patch) { return mgr.update(dt, patch); },
+    setWorld(p) { return mgr.setWorld(p); },
+    setQuality(q) { return mgr.setQuality(q); },
+    gameplay(kind, npc, extra) { return mgr.gameplay(kind, npc, extra); },
+    notifyLoud(ev) { return mgr.notifyLoud(ev); },
+    snapshot() { return mgr.snapshot(); },
+    get bus() { return mgr.bus; },
+    get music() { return mgr.music; },
+    get vocals() { return mgr.vocals; },
+    get pool() { return mgr.pool; },
+    get mixer() { return mgr.mixer; },
+    get debug() { return mgr.debug; },
+    // --- compatibilità legacy: ogni vecchio metodo emette l'evento semantico ---
     tone(freq, dur, type = 'sine', vol = 1, slide = 0) {
-      if (!A.ensure()) return;
-      const t = A.ctx.currentTime;
-      const o = A.ctx.createOscillator(), g = A.ctx.createGain();
-      o.type = type; o.frequency.setValueAtTime(freq, t);
-      if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), t + dur);
-      g.gain.setValueAtTime(vol, t);
-      g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-      o.connect(g); g.connect(A.master);
-      o.start(t); o.stop(t + dur + 0.02);
+      void freq; void dur; void type; void vol; void slide;
+      return mgr.emit({ type: 'OBJECT_DROP', intensity: 0.3 });
     },
     noiseBurst(dur, vol = 1, low = 400) {
-      if (!A.ensure()) return;
-      const t = A.ctx.currentTime;
-      const len = Math.floor(A.ctx.sampleRate * dur);
-      const buf = A.ctx.createBuffer(1, len, A.ctx.sampleRate);
-      const d = buf.getChannelData(0);
-      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
-      const src = A.ctx.createBufferSource(); src.buffer = buf;
-      const f = A.ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = low;
-      const g = A.ctx.createGain(); g.gain.value = vol;
-      src.connect(f); f.connect(g); g.connect(A.master);
-      src.start(t);
+      void dur; void vol; void low;
+      return mgr.emit({ type: 'IMPACT', intensity: 0.3 });
     },
-    step(run) { // passi: throttled dal chiamante
-      A.noiseBurst(0.07, run ? 0.5 : 0.25, 500);
+    step(run) { return mgr.emit({ type: run ? 'FOOTSTEP_RUN' : 'FOOTSTEP', intensity: run ? 0.55 : 0.35 }); },
+    footstep(surface = 'asphalt', run = false, crouch = false) {
+      return mgr.emit({ type: crouch ? 'FOOTSTEP_CROUCH' : run ? 'FOOTSTEP_RUN' : 'FOOTSTEP', intensity: crouch ? 0.22 : run ? 0.55 : 0.35, surface });
     },
-    whistle() { A.tone(2200, 0.35, 'sine', 0.7, 600); },
-    swing() { A.noiseBurst(0.12, 0.3, 1200); },
-    thud() { A.noiseBurst(0.25, 0.9, 300); A.tone(90, 0.2, 'sine', 0.8, -40); },
-    clank() { A.tone(620, 0.15, 'square', 0.3); A.tone(930, 0.1, 'square', 0.2); },
-    crash() { A.noiseBurst(0.7, 1.0, 900); A.tone(70, 0.5, 'sine', 0.7, -30); },
+    whistle() { return mgr.emit({ type: 'NPC_WHISTLE', intensity: 0.6 }); },
+    swing() { return mgr.emit({ type: 'COMBAT', intensity: 0.35 }); },
+    thud() { return mgr.emit({ type: 'IMPACT', intensity: 0.85 }); },
+    clank() { return mgr.emit({ type: 'METAL_IMPACT', intensity: 0.6 }); },
+    crash() { return mgr.emit({ type: 'OBJECT_BREAK', intensity: 0.9 }); },
     sting() {
       if (A.stingT) clearTimeout(A.stingT);
-      A.tone(440, 0.4, 'sawtooth', 0.4, 220);
-      // timeout tracciato: dispose() lo cancella (mai timer orfano dopo destroy)
-      A.stingT = setTimeout(() => { A.stingT = 0; A.tone(554, 0.4, 'sawtooth', 0.4, 220); }, 180);
+      mgr.emit({ type: 'ALARM', intensity: 0.7 });
+      A.stingT = setTimeout(() => { A.stingT = 0; mgr.emit({ type: 'ALARM', intensity: 0.6 }); }, 180);
     },
-    scream() { A.tone(900, 0.3, 'sawtooth', 0.35, 500); },
-    // S7 — feedback sonoro delle interazioni (sintetizzato, nessun asset)
-    door() { A.noiseBurst(0.15, 0.4, 700); A.tone(140, 0.18, 'triangle', 0.5, -40); },
-    window() { A.noiseBurst(0.1, 0.25, 2000); A.tone(500, 0.1, 'triangle', 0.25, 120); },
-    drawer() { A.noiseBurst(0.18, 0.35, 900); },
-    pickup() { A.tone(660, 0.09, 'sine', 0.5); setTimeout(() => A.tone(990, 0.12, 'sine', 0.5), 90); },
-    switch_() { A.tone(1200, 0.05, 'square', 0.25); },
-    sit() { A.noiseBurst(0.12, 0.3, 400); },
-    phone() { A.tone(440, 0.15, 'sine', 0.4); setTimeout(() => A.tone(480, 0.15, 'sine', 0.4), 200); },
-    bell() { A.tone(880, 0.5, 'sine', 0.5, -80); setTimeout(() => A.tone(880, 0.5, 'sine', 0.4, -80), 350); },
-    locked() { A.tone(180, 0.12, 'square', 0.35); setTimeout(() => A.tone(150, 0.15, 'square', 0.35), 140); },
-    ambience() {
-      // vento/citta': rumore filtrato in loop a basso volume
-      const len = A.ctx.sampleRate * 2;
-      const buf = A.ctx.createBuffer(1, len, A.ctx.sampleRate);
-      const d = buf.getChannelData(0);
-      let v = 0;
-      for (let i = 0; i < len; i++) { v = v * 0.98 + (Math.random() * 2 - 1) * 0.02; d[i] = v; }
-      const src = A.ctx.createBufferSource(); src.buffer = buf; src.loop = true;
-      const f = A.ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 400;
-      const g = A.ctx.createGain(); g.gain.value = 0.5;
-      src.connect(f); f.connect(g); g.connect(A.master);
-      src.start();
-      A.ambienceSrc = src; // tracciato per dispose(): il loop non sopravvive al destroy
-    },
-    // Anti double-boot: ferma il loop ambience, cancella i timeout e chiude il
-    // contesto. Senza, un secondo boot accumula contesti/loop attivi.
+    scream() { return mgr.emit({ type: 'NPC_SCREAM', intensity: 0.85 }); },
+    door(slam = false) { return mgr.emit({ type: slam ? 'DOOR_SLAM' : 'DOOR_CLOSE', intensity: slam ? 0.9 : 0.55 }); },
+    window() { return mgr.emit({ type: 'WINDOW_OPEN', intensity: 0.4 }); },
+    drawer() { return mgr.emit({ type: 'OBJECT_DROP', intensity: 0.4 }); },
+    pickup() { return mgr.emit({ type: 'OBJECT_DROP', intensity: 0.35 }); },
+    switch_() { return mgr.emit({ type: 'ELECTRIC', intensity: 0.25 }); },
+    sit() { return mgr.emit({ type: 'WOOD_IMPACT', intensity: 0.35 }); },
+    phone() { return mgr.emit({ type: 'PHONE_RING', intensity: 0.55 }); },
+    bell() { return mgr.emit({ type: 'DOORBELL', intensity: 0.6 }); },
+    locked() { return mgr.emit({ type: 'METAL_IMPACT', intensity: 0.4 }); },
+    ambience() { return true; }, // il base loop parte dentro ensure()
     dispose() {
       try { if (A.stingT) { clearTimeout(A.stingT); A.stingT = 0; } } catch { /* best-effort */ }
-      try { A.ambienceSrc?.stop(); } catch { /* gia' fermato */ }
-      A.ambienceSrc = null;
-      try { A.ctx?.close(); } catch { /* best-effort */ }
-      A.ctx = null; A.master = null;
-    }
+      try { mgr._ungesture?.(); } catch { /* noop */ }
+      mgr.dispose();
+    },
   };
   return A;
 }

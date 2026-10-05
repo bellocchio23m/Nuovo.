@@ -98,12 +98,16 @@ if (params.has('test')) {
   (async () => {
     const { runAllTests } = await import('./test/harness.js');
     const { runInfraTests } = await import('./test/infra.js');
+    const { runAudioTests } = await import('./test/audio.js');
+    const { runS9Tests } = await import('./test/s9.js');
     const foundation = await runAllTests();
     const infra = runInfraTests();
-    const all = [...foundation.tests, ...infra.tests];
+    const audioS10 = runAudioTests();
+    const s9 = runS9Tests();
+    const all = [...foundation.tests, ...infra.tests, ...audioS10.tests, ...s9.tests];
     const res = {
       passed: all.filter(t => t.pass).length, total: all.length,
-      suites: [foundation.suite, infra.suite], tests: all
+      suites: [foundation.suite, infra.suite, audioS10.suite, s9.suite], tests: all
     };
     document.body.innerHTML = `<pre id="test-out" style="padding:16px;font:12px monospace;white-space:pre-wrap">${escapeHtml(JSON.stringify(res, null, 1))}</pre>`;
     console.log('[P0-TEST]', JSON.stringify(res));

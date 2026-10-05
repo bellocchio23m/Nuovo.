@@ -1,8 +1,9 @@
 import { resolveCircle } from '../world/world.js';
+import { groundYAt } from '../world/buildings.js';
 
 export function makePlayer(x, z) {
   return {
-    x, z, yaw: Math.PI, speed: 0, mesh: null, interactTarget: null,
+    x, z, y: 0, yaw: Math.PI, speed: 0, mesh: null, interactTarget: null,
     crouch: false, running: false, attackT: -99
   };
 }
@@ -27,11 +28,18 @@ export function updatePlayer(p, input, camYaw, dt, colliders) {
   p.running = p.speed > 3.5;
   const r = resolveCircle(p.x, p.z, 0.4, colliders);
   p.x = r.x; p.z = r.z;
+  // S8: quota scale/piani (continua, mai teletrasporto: la Y insegue la
+  // rampa a velocita' di salita realistica, il solaio scatta per isteresi).
+  const targetY = groundYAt(p.x, p.z, p.y ?? 0);
+  const vy = targetY > (p.y ?? 0) ? 2.2 : 6.0; // salita lenta, discesa rapida
+  const dy = targetY - (p.y ?? 0);
+  const step = Math.max(-vy * dt, Math.min(vy * dt, dy));
+  p.y = (p.y ?? 0) + step;
 }
 
 export function serializePlayer(p) {
   return {
-    x: p.x, z: p.z, yaw: p.yaw, crouch: p.crouch,
+    x: p.x, z: p.z, y: p.y ?? 0, yaw: p.yaw, crouch: p.crouch,
     // timer d'azione simulativi: senza, il load azzera i cooldown e
     // permette attacco/fischio immediati (stato perso, non piu' un dettaglio)
     attackCd: p.attackCd ?? -99, whistleCd: p.whistleCd ?? -99,
@@ -41,6 +49,7 @@ export function serializePlayer(p) {
 
 export function restorePlayerExtra(p, s) {
   p.crouch = s.crouch ?? false; p.running = false;
+  p.y = s.y ?? 0;
   p.attackCd = s.attackCd ?? -99;
   p.whistleCd = s.whistleCd ?? -99;
   p.attackT = s.attackT ?? -99;

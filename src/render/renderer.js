@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { buildStaticScene } from './staticScene.js';
+import { buildInteriors } from './interiors.js';
+import { buildS9District } from './s9_district.js';
 import { sharedLambert, sharedBasic, sharedGeo, disposeAssets } from './assets.js';
 import { WORLD } from '../world/mapData.js';
 import { makeHumanoid as makeHuman, animateHumanoid as animateHuman, setHumanCamera } from './humans.js';
@@ -54,14 +56,16 @@ export function makeRenderer(container) {
     renderer.shadowMap.type = THREE.PCFShadowMap;
     sun.castShadow = true;
     sun.shadow.mapSize.set(1024, 1024);
-    sun.shadow.camera.left = -60; sun.shadow.camera.right = 60;
-    sun.shadow.camera.top = 60; sun.shadow.camera.bottom = -60;
-    sun.shadow.camera.near = 5; sun.shadow.camera.far = 150;
+    sun.shadow.camera.left = -85; sun.shadow.camera.right = 85;
+    sun.shadow.camera.top = 85; sun.shadow.camera.bottom = -85;
+    sun.shadow.camera.near = 5; sun.shadow.camera.far = 200;
     sun.shadow.bias = -0.0006;
     sun.shadow.radius = 2;
   }
 
   buildStaticScene(scene);
+  buildInteriors(scene); // S8: interni veri (stessa fonte dei collider)
+  buildS9District(scene); // S9: espansione est/sud/ovest/nord (solo aggiunte)
 
   const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 300);
   const onResize = () => {

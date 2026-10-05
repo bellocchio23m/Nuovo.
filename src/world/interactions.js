@@ -3,6 +3,7 @@
 // sistema esistente (serializeGame salva l'intero oggetto, applySave
 // ripristina gli stati noti). Nessuna modifica a NPC/AI/locomotion/navigation.
 import { allDoors, allWindows } from './buildings.js';
+import { S9_INTERACT } from './s9_district.js';
 
 export const INTERACT_RADIUS = 3.0;
 
@@ -107,7 +108,7 @@ function containers() {
     D('cont_svc_box', 'container', 'OPEN', -36, 19, 'Cassa del deposito', { loot: 'tool_hammer' }),
     D('cont_yard_crate', 'container', 'OPEN', -37, 21.5, 'Cassa', {}),
     D('cont_court_chest', 'container', 'OPEN', -22, 31, 'Baule', { loot: 'doc_court' }),
-    D('cont_b2_ward', 'container', 'SEARCH', 11.4, 21.5, 'Armadio (camera)', { y: 0, loot: 'doc_apt' }),
+    D('cont_b2_ward', 'container', 'SEARCH', 12.65, 21.5, 'Armadio (camera)', { y: 0, loot: 'doc_apt' }),
     D('cont_b2_desk', 'container', 'OPEN', 15.1, 20.7, 'Scrivania (camera)', { y: 0 }),
     D('cont_b2_kit', 'container', 'OPEN', 15.1, 14.6, 'Pensile cucina', { y: 0, loot: 'coin_b2' }),
     D('cont_b2U_ward', 'container', 'SEARCH', 15.5, 15.5, 'Armadio (sopra)', { y: 3 }),
@@ -140,7 +141,7 @@ function pickups() {
     D('bottle_depot', 'pickup', 'TAKE', 15.8, 8.8, 'Bottiglia', { state: 'hidden' }),
     D('tool_hammer', 'pickup', 'TAKE', -36.8, 19.6, 'Martello', { state: 'hidden' }),
     D('coin_piazza', 'pickup', 'TAKE', 14.5, -21.6, 'Moneta', { state: 'hidden' }),
-    D('doc_apt', 'pickup', 'TAKE', 11.4, 22.2, 'Lettera', { state: 'hidden', y: 0 }),
+    D('doc_apt', 'pickup', 'TAKE', 12.65, 22.2, 'Lettera', { state: 'hidden', y: 0 }),
     D('coin_b2', 'pickup', 'TAKE', 15.1, 15.2, 'Spiccioli', { state: 'hidden', y: 0 }),
     D('bottle_shop', 'pickup', 'TAKE', 25.4, 24.6, 'Bottiglia', { state: 'hidden', y: 0 }),
     D('doc_family', 'pickup', 'TAKE', -12.1, -18.4, 'Foto di famiglia', { state: 'hidden', y: 0 }),
@@ -176,7 +177,7 @@ function furniture() {
     D('sit_bench_1', 'furniture', 'SIT', 33, 24, 'Panchina', { state: 'free', radius: 2.2 }),
     D('sit_bench_2', 'furniture', 'SIT', 40, 17, 'Panchina', { state: 'free', radius: 2.2 }),
     D('sit_crate', 'furniture', 'SIT', 15.8, 8.8, 'Cassa (seduta)', { state: 'free' }),
-    D('sit_b2_sofa', 'furniture', 'SIT', 12.2, 16.6, 'Divano', { state: 'free', y: 0 }),
+    D('sit_b2_sofa', 'furniture', 'SIT', 12.75, 18.3, 'Divano', { state: 'free', y: 0 }),
     D('sit_b2_bed', 'furniture', 'SIT', 12, 24.2, 'Letto', { state: 'free', y: 0 }),
     D('sit_b4_sofa', 'furniture', 'SIT', -21, -17.4, 'Divano', { state: 'free', y: 0 }),
     D('sit_b4_chair', 'furniture', 'SIT', -19.1, -17.1, 'Poltrona', { state: 'free', y: 0 }),
@@ -191,9 +192,7 @@ function devices() {
     D('dev_radio', 'device', 'USE', -19.2, 25.2, 'Radio', { state: 'off', radius: 2.2 }),
     D('dev_phone', 'device', 'USE', 28.5, 12.5, 'Telefono pubblico', { state: 'idle', radius: 2.2 }),
     D('dev_bell', 'device', 'RING', 11.8, 13.2, 'Campanello', { state: 'idle', radius: 2.2 }),
-    D('dev_b4_tv', 'device', 'USE', -16.9, -18.4, 'Televisore', { state: 'off', radius: 2.2, y: 0 }),
-    D('dev_b2_radio', 'device', 'USE', 15.5, 16.6, 'Radio', { state: 'off', radius: 2.2, y: 0 }),
-    D('dev_b5_coffee', 'device', 'USE', 14.3, -24.4, 'Macchina del caffe (ufficio)', { state: 'idle', radius: 2.2, y: 0 }),
+    D('dev_b4_tv', 'device', 'USE', -19.8, -15.7, 'Televisore', { state: 'off', radius: 2.2, y: 0 }),
   ];
 }
 
@@ -221,7 +220,11 @@ function vehicles() {
 export function interactionInitialStates() {
   const out = {};
   for (const d of [...doors(), ...windows(), ...containers(), ...pickups(),
-    ...lights(), ...furniture(), ...devices(), ...street(), ...vehicles()]) {
+    ...lights(), ...furniture(), ...devices(), ...street(), ...vehicles(),
+    // S9: solo aggiunte (id s9_*), nessun def storico toccato
+    ...S9_INTERACT.doors, ...S9_INTERACT.windows, ...S9_INTERACT.containers,
+    ...S9_INTERACT.pickups, ...S9_INTERACT.lights, ...S9_INTERACT.furniture,
+    ...S9_INTERACT.devices, ...S9_INTERACT.street, ...S9_INTERACT.vehicles]) {
     out[d.id] = d;
   }
   return out;

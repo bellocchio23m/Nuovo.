@@ -92,8 +92,50 @@ export function doorOpenForNav(d) {
   return !isBlocking(d);
 }
 
-// Istantanea serializzabile (la persistenza esistente salva comunque gli
-// stati in tabella interazioni; questo serve ai test e al boot headless).
+// Guida il runtime dallo stato tabella (dopo activate/load): l'anta anima
+// da dove si trova verso il nuovo stato; la serratura segue la tabella.
+export function driveFromTable(rt, id, open, lockedBy) {
+  const d = rt[id];
+  if (!d) return;
+  if (lockedBy !== undefined) d.lockedBy = lockedBy;
+  if (open) {
+    if (d.state === DOOR_OPEN || d.state === DOOR_OPENING) return;
+    d.state = DOOR_OPENING; d.from = d.anim; d.to = 1; d.t = 0;
+  } else {
+    if (d.state === DOOR_CLOSED || d.state === DOOR_CLOSING) return;
+    d.state = DOOR_CLOSING; d.from = d.anim; d.to = 0; d.t = 0;
+  }
+}
+
+// Allinea istantaneamente il runtime alla tabella (boot/load).
+export function snapFromTable(rt, table) {
+  for (const e of Object.values(table)) {
+    if (e.kind !== 'door') continue;
+    const d = rt[e.id];
+    if (!d) continue;
+    d.lockedBy = e.lockedBy ?? null;
+    if (e.state === 'open') { d.state = DOOR_OPEN; d.anim = 1; d.from = 1; d.to = 1; d.t = 0; }
+    else { d.state = DOOR_CLOSED; d.anim = 0; d.from = 0; d.to = 0; d.t = 0; }
+  }
+}
+
+export function driveWin(rt, id, open) {
+  const w = rt[id];
+  if (!w) return;
+  w.state = open ? 'open' : 'closed';
+  w.from = w.anim; w.to = open ? 1 : 0; w.t = 0;
+}
+
+export function snapWinFromTable(rt, table) {
+  for (const e of Object.values(table)) {
+    if (e.kind !== 'window') continue;
+    const w = rt[e.id];
+    if (!w) continue;
+    w.state = e.state === 'open' ? 'open' : 'closed';
+    w.anim = w.to = w.state === 'open' ? 1 : 0;
+    w.from = w.anim; w.t = 0;
+  }
+}
 export function snapshotDoors(rt) {
   const out = {};
   for (const [id, d] of Object.entries(rt)) {

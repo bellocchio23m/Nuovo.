@@ -2,9 +2,12 @@ import * as THREE from 'three';
 import { makeRng } from './core/rng.js';
 import { makeJournal } from './core/events.js';
 import { WORLD, initialInteractables } from './world/mapData.js';
-import { buildColliders, pointInBuilding, setWorldObstacle, clearWorldObstacle, setDoorPassage, setWindowPassage } from './world/world.js';
+import { buildColliders, pointInBuilding, setWorldObstacle, clearWorldObstacle, setDoorPassage, setWindowPassage, losBlocked } from './world/world.js';
 import { interactionInitialStates, nearestInteractable, promptFor, activate as activateInteract, doorObstacle } from './world/interactions.js';
 import { buildInteractionObjects, syncInteractionMesh, syncAllInteractionMeshes, tickInteractionMeshes } from './render/interactionMeshes.js';
+import { buildInteriors, syncS8Visuals, syncS8Light, syncAllS8Lights } from './render/interiors.js';
+import { allDoors, allWindows, buildingAt, surfaceAt, debugInfo, BUILDINGS } from './world/buildings.js';
+import { createDoorRuntime, createWindowRuntime, updateDoors, updateWindows, isBlocking, windowBlocking, driveFromTable, driveWin, snapFromTable, snapWinFromTable } from './world/doors.js';
 import { buildNavGraph, validateNav } from './world/navigation.js';
 import { makeNpc } from './sim/npc.js';
 import { ROSTER } from './sim/roster.js';
@@ -54,25 +57,44 @@ export function makeGame(seed) {
       n.alertT = game.sim.t;
       if (ev.type === 'kill' || ev.type === 'sabotage' || ev.type === 'found_corpse') {
         game.hud?.toast(`👁 ${n.name} ha visto qualcosa!`);
-        if (ev.type === 'kill') game.audio?.scream();
+        // S10: versi emergenti dai soli hook esistenti (nessuna nuova AI)
+        if (ev.type === 'kill') {
+          game.audio?.gameplay?.('corpse', n, { intensity: 0.9 });
+          game.audio?.notifyLoud?.({ type: 'NPC_SCREAM', source: n.id, x: n.x, z: n.z, intensity: 0.9 });
+        } else if (ev.type === 'found_corpse') {
+          game.audio?.gameplay?.('corpse', n, { intensity: 0.75 });
+        } else {
+          game.audio?.gameplay?.('witness', n, { intensity: 0.6 });
+        }
+        game._lastMajorAudio = game.sim.t;
+      } else if (ev.type === 'assault' || ev.type === 'theft' || ev.type === 'disturbance' || ev.type === 'noise') {
+        game.audio?.gameplay?.('witness', n, { intensity: 0.45 });
       }
     },
     onGossip: (a, b) => game.hud?.toast(`💬 ${a.name} ha raccontato qualcosa a ${b.name}`),
     onInterview: (off, civ) => game.hud?.toast(`👮 ${off.name} interroga ${civ.name}`),
     onPoliceState: (off, prev, next) => {
-      if (next === 'ALERT' || next === 'SEARCHING') game.audio?.sting();
+      if (next === 'ALERT' || next === 'SEARCHING') {
+        game.audio?.sting();
+        // S10: sirena + stato musicale HUNT dai soli segnali esistenti
+        game.audio?.emit?.({ type: 'POLICE_SIREN', x: off.x, z: off.z, intensity: 0.8 });
+        game.audio?.gameplay?.('anger', off, { intensity: 0.7 });
+        game._lastMajorAudio = game.sim.t;
+      }
     },
     onCaught: () => {
       game.caught = true;
       game.ended = 'caught';
       document.getElementById('caught').style.display = 'flex';
       game.audio?.sting();
+      game._lastMajorAudio = game.sim.t;
     },
     // Arresto di un SOSPETTO sulla scena (mai il giocatore per definizione):
     // la polizia applica l'arresto, qui c'e' solo la resa + il messaggio.
     onArrest: (off, sus) => {
       game.hud?.toast(`👮 ${off.name} ha arrestato ${sus.name}: è lui il sospetto`);
       game.audio?.sting();
+      game._lastMajorAudio = game.sim.t;
     }
   });
   for (const def of ROSTER) game.npcs.push(makeNpc(def, game.rng));
@@ -94,11 +116,30 @@ export function makeGame(seed) {
   refreshDoorColliders(game);
   game.interactMeshes = buildInteractionObjects(game.renderer.scene, game.interactables);
   syncAllInteractionMeshes(game.interactMeshes.refs, game.interactables);
+  // S8: runtime ante/finestre (stati, animazioni, serrature) + luci interne.
+  game.doors = createDoorRuntime(allDoors());
+  game.winRt = createWindowRuntime(allWindows());
+  snapFromTable(game.doors, game.interactables);
+  snapWinFromTable(game.winRt, game.interactables);
+  syncAllS8Lights(game.renderer.scene, game.interactables);
 
   game.inputHandle = makeInput();
   game.input = game.inputHandle.api;
   game.hud = makeHud(game);
   game.audio = makeAudio();
+  // S10: dipendenze mondo per zone/occlusione + qualità per hardware.
+  try {
+    const isMobile = (typeof window !== 'undefined') &&
+      (('ontouchstart' in window) || (window.innerWidth ?? 9999) < 760);
+    game.audio.setQuality?.(isMobile ? 'LOW' : 'MEDIUM');
+    const mgr = game.audio._mgr;
+    if (mgr) {
+      mgr._zoneDeps.buildingAt = (x, z) => buildingAt(x, z);
+      mgr._zoneDeps.buildingTypeOf = (bId) => (bId ? BUILDINGS[bId]?.type ?? null : null);
+      mgr._zoneDeps.roomsOf = (bId) => (bId ? BUILDINGS[bId]?.rooms ?? null : null);
+      mgr._zoneDeps.losBlocked = (ax, az, bx, bz) => losBlocked(ax, az, bx, bz, game.colliders);
+    }
+  } catch { /* audio best-effort: mai un throw a boot */ }
   syncInteractables(game);
 
   const onErr = (e) => {
@@ -160,6 +201,12 @@ export function killNpc(game, npc, method) {
   // rumore dell'atto: chi sente accorre a controllare (canale 'heard')
   emitNoise(game, npc.x, npc.z, method === 'melee' ? 18 : 22, 0.35);
   game.audio?.thud();
+  // S10: dolore/urlo della vittima + reazione a catena dei vicini
+  try {
+    game.audio?.emit?.({ type: 'NPC_PAIN', source: npc.id, x: npc.x, z: npc.z, intensity: 0.9, gameplay: 'pain' });
+    game.audio?.notifyLoud?.({ type: 'NPC_SCREAM', source: npc.id, x: npc.x, z: npc.z, intensity: 0.9 });
+    game._lastMajorAudio = game.sim.t;
+  } catch { /* noop */ }
   return ev;
 }
 
@@ -187,6 +234,11 @@ export function attack(game) {
   const out = attemptMelee(game.sim, game.player, best, game.sim.rng.next());
   if (out.hit) return killNpc(game, best, 'melee');
   game.audio?.swing(); // colpo mancato: svista, il bersaglio puo' reagire
+  // S10: sforzo + spavento del bersaglio (hook esistenti, nessuna nuova AI)
+  try {
+    game.audio?.emit?.({ type: 'NPC_EFFORT', x: game.player.x, z: game.player.z, intensity: 0.5 });
+    game.audio?.gameplay?.('flee', best, { intensity: 0.55 });
+  } catch { /* noop */ }
   return out;
 }
 
@@ -209,6 +261,7 @@ export function sabotage(game) {
   st.state = 'armed';
   game.syncInteractables();
   game.audio?.clank();
+  try { game.audio?.emit?.({ type: 'METAL_IMPACT', x: st.x, z: st.z, intensity: 0.6, material: 'metal' }); } catch { /* noop */ }
   publishEvent(game.sim, 'sabotage', {
     severity: 0.5, x: st.x, z: st.z, actorId: 'player', place: 'svc_in'
   });
@@ -227,6 +280,11 @@ export function checkCollapse(game) {
       st.state = 'fallen';
       game.syncInteractables();
       game.audio?.crash();
+      try {
+        game.audio?.emit?.({ type: 'EXPLOSION', x: st.x, z: st.z, intensity: 0.95 });
+        game.audio?.emit?.({ type: 'WOOD_IMPACT', x: st.x, z: st.z, intensity: 0.8, material: 'wood' });
+        game._lastMajorAudio = game.sim.t;
+      } catch { /* noop */ }
       killNpc(game, n, 'trap');
       game.hud.toast('💥 La catasta è crollata!');
       return;
@@ -296,12 +354,20 @@ export function frame(game, rawDt) {
   } else {
     updatePlayer(game.player, game.input, game.camYaw, dt, game.colliders);
   }
-  // passi: audio proporzionale alla distanza percorsa
+  // passi: audio proporzionale alla distanza percorsa (S10: superficie reale)
   game.stepAcc = (game.stepAcc ?? 0) + game.player.speed * dt;
   const stride = game.player.crouch ? 1.6 : (game.player.running ? 2.6 : 2.0);
   if (game.stepAcc > stride && game.player.speed > 0.5) {
     game.stepAcc = 0;
-    game.audio?.step(game.player.running);
+    try {
+      const surf = surfaceAt(game.player.x, game.player.z, game.player.y ?? 0);
+      if (game.audio?.footstep) game.audio.footstep(surf, game.player.running, game.player.crouch);
+      else game.audio?.step?.(game.player.running);
+      game.audio?.emit?.({
+        type: game.player.running ? 'FOOTSTEP_RUN' : game.player.crouch ? 'FOOTSTEP_CROUCH' : 'FOOTSTEP',
+        x: game.player.x, z: game.player.z, intensity: game.player.running ? 0.55 : 0.35, surface: surf,
+      });
+    } catch { /* audio mai bloccante */ }
   }
 
   game.acc = (game.acc ?? 0) + dt;
@@ -310,6 +376,28 @@ export function frame(game, rawDt) {
 
   // osservazione player (taccuino): solo percezione, mai onniscienza
   observeWorld(game.pk, game.player, game.camYaw, game.npcs, game.colliders, game.sim.t, dt);
+
+  // S10: Dynamic Audio World — un update per frame (scheduler interni +
+  // occlusion a bassa frequenza + musica adattiva). Mai bloccante.
+  try {
+    if (game.audio?.update) {
+      const policeAlert = game.npcs.some((n) => n.role === 'police' && n.police && (n.police.state === 'ALERT' || n.police.state === 'SEARCHING'));
+      const combat = (game.sim.t - (game.player.attackT ?? -99)) < 2;
+      const calmFor = game._lastMajorAudio != null ? game.sim.t - game._lastMajorAudio : 99;
+      game.audio.update(dt, {
+        player: { x: game.player.x, z: game.player.z, yaw: game.camYaw, y: game.player.y ?? 0 },
+        npcs: game.npcs,
+        simT: game.sim.t,
+        colliders: game.colliders,
+        interactables: game.interactables,
+        weather: game.worldWeather ?? 'clear',
+        policeAlert, playerWanted: game.caught, combat,
+        fleeing: !!game.player.running, calmFor,
+      });
+    }
+  } catch (e) {
+    if (game.errors.length < 20) game.errors.push('audio:' + String(e.message ?? e).slice(0, 80));
+  }
 
   // crollo catasta sabotata (fisica del mondo, non script)
   checkCollapse(game);
@@ -334,7 +422,7 @@ export function frame(game, rawDt) {
   const nearStack = Math.hypot(game.player.x - st.x, game.player.z - st.z) < 2.8;
   const corpse = findCorpseNear(game.sim, game.player.x, game.player.z, 2.2);
   const worldTgt = game.player.seated ? null
-    : nearestInteractable(game.interactables, game.player.x, game.player.z, 3.0, 0);
+    : nearestInteractable(game.interactables, game.player.x, game.player.z, 3.0, game.player.y ?? 0);
   const npcD = tgt ? Math.hypot(tgt.npc.x - game.player.x, tgt.npc.z - game.player.z) : 1e9;
   const worldD = worldTgt ? Math.hypot(worldTgt.x - game.player.x, worldTgt.z - game.player.z) : 1e9;
   const useWorld = worldTgt && worldD <= npcD;
@@ -359,6 +447,10 @@ export function frame(game, rawDt) {
   if (game.input.wasPressed('KeyJ')) game.hud.togglePanel();
   if (game.input.wasPressed('KeyN')) game.hud.toggleNotebook();
   if (game.input.wasPressed('F3')) game.hud.toggleDebug();
+  if (game.input.wasPressed('F4')) {
+    game.showS8 = !game.showS8;
+    game.hud.toast(game.showS8 ? 'Diagnostica edifici: attiva' : 'Diagnostica edifici: spenta');
+  }
   if (document.getElementById('notebook').style.display === 'block' && (game._nTick = (game._nTick ?? 0) + 1) % 20 === 0) game.hud.renderNotebook();
 
   // esito del contratto: finestra temporale / bersaglio abbattuto. Nessun
@@ -384,7 +476,7 @@ export function frame(game, rawDt) {
 
   // sync mesh + camera follow
   const pm = game.player.mesh;
-  pm.position.set(game.player.x, game.player.seated ? -0.32 : bob(game.player), game.player.z);
+  pm.position.set(game.player.x, (game.player.y ?? 0) + (game.player.seated ? -0.32 : bob(game.player)), game.player.z);
   pm.rotation.y = game.player.yaw;
   animateHumanoid(pm, game.player.seated ? 0 : game.player.speed, game.sim.t,
     (game.sim.t - (game.player.attackT ?? -99)) < 0.45,
@@ -405,7 +497,11 @@ export function frame(game, rawDt) {
     // arrestato: la polizia lo porta via, non lo vedi piu'
     n.mesh.visible = n.state !== 'arrested' && !(n.state === 'dead' && n.hidden);
   }
-  const indoor = pointInBuilding(game.player.x, game.player.z, 'bar');
+  // S8: dentro qualsiasi edificio (non solo il bar), camera ravvicinata e
+  // alta quanto il piano frequentato (scale comprese).
+  const bId = buildingAt(game.player.x, game.player.z);
+  const indoor = !!bId;
+  const py = game.player.y ?? 0;
   const cd = indoor ? 3.2 : 7.0;
   const fx = Math.sin(game.camYaw), fz = Math.cos(game.camYaw);
   // pull-in anti-occlusione: avvicina la camera finché non è fuori dai muri
@@ -419,13 +515,27 @@ export function frame(game, rawDt) {
   }
   const cx = game.player.x - fx * Math.cos(game.camPitch) * cd * t;
   const cz = game.player.z - fz * Math.cos(game.camPitch) * cd * t;
-  const cy = indoor ? 2.5 : Math.sin(game.camPitch) * cd * t + 1.6;
+  const cy = indoor ? py + 2.5 : Math.sin(game.camPitch) * cd * t + 1.6;
   game.renderer.camera.position.set(cx, cy, cz);
-  game.renderer.camera.lookAt(game.player.x + fx * 2.2, 1.2, game.player.z + fz * 2.2);
+  game.renderer.camera.lookAt(game.player.x + fx * 2.2, py + 1.2, game.player.z + fz * 2.2);
   // S7: animazioni interazioni (solo vicino al player) + anello di highlight
   if (game.interactMeshes) {
     tickInteractionMeshes(game.interactMeshes.refs, game.interactMeshes.ring,
       dt, game.player.x, game.player.z, useWorld ? worldTgt.id : null);
+  }
+  // S8: ante/finestre reali (stessa animazione per tutti i battenti) +
+  // passaggi mondo coerenti con l'animazione.
+  if (game.doors) {
+    const ms = dt * 1000;
+    const dc = updateDoors(game.doors, ms);
+    for (const id of dc.changed) setDoorPassage(id, !isBlocking(game.doors[id]));
+    if (dc.changed.length) game.colliders = buildColliders();
+    const wc = updateWindows(game.winRt, ms);
+    void wc;
+    for (const w of Object.values(game.winRt)) {
+      if (w.passable) setWindowPassage(w.id, !windowBlocking(w));
+    }
+    syncS8Visuals(game.renderer.scene, game.doors, game.winRt);
   }
   game.renderer.renderer.render(game.renderer.scene, game.renderer.camera);
   game.hud.tickToast();
@@ -459,15 +569,32 @@ export function syncInteractables(game) {
     refreshDoorColliders(game);
     syncAllInteractionMeshes(game.interactMeshes.refs, game.interactables);
   }
+  // S8: riallinea ante/finestre/luci allo stato persistito
+  if (game.doors) {
+    snapFromTable(game.doors, game.interactables);
+    snapWinFromTable(game.winRt, game.interactables);
+    for (const d of allDoors()) {
+      const e = game.interactables[d.id];
+      if (e) setDoorPassage(d.id, e.state === 'open');
+    }
+    game.colliders = buildColliders();
+    syncS8Visuals(game.renderer.scene, game.doors, game.winRt);
+    syncAllS8Lights(game.renderer.scene, game.interactables);
+  }
 }
 
 // --- S7: porte chiuse = ostacoli reali (fisica via game.colliders,
 // navigazione via colliderEpoch invalidazione cache). ---
+// S8: le porte con vano reale usano il passaggio sottile nel muro cavo
+// (setDoorPassage); i cancelli esterni senza vano restano ostacoli S7.
+const S8_DOOR_IDS = new Set(allDoors().map(d => d.id));
 export function refreshDoorColliders(game) {
   for (const d of Object.values(game.interactables)) {
     if (d.kind !== 'door') continue;
     const open = d.state === 'open';
-    if (open) clearWorldObstacle('door:' + d.id);
+    if (S8_DOOR_IDS.has(d.id)) {
+      clearWorldObstacle('door:' + d.id); // mai doppio: vale il vano S8
+    } else if (open) clearWorldObstacle('door:' + d.id);
     else setWorldObstacle('door:' + d.id, doorObstacle(d));
     setDoorPassage(d.id, open); // S8: vano reale nel muro cavo (vale anche al load)
   }
@@ -484,6 +611,29 @@ const INTERACT_SOUNDS = {
 export function useInteractable(game, id) {
   const res = activateInteract(game.interactables, id);
   if (res.sound && INTERACT_SOUNDS[res.sound]) game.audio?.[INTERACT_SOUNDS[res.sound]]?.();
+  // S10: evento semantico spazializzato (materiale/intensità/posizione reali)
+  try {
+    const entry = game.interactables[id];
+    const ex = entry?.x ?? game.player.x, ez = entry?.z ?? game.player.z;
+    if (res.door) {
+      const slammed = entry?.kind === 'door';
+      game.audio?.emit?.({ type: res.door.open ? 'DOOR_OPEN' : 'DOOR_SLAM', x: ex, z: ez, intensity: res.door.open ? 0.5 : 0.75, material: entry?.lockedBy ? 'metal' : 'wood', source: id });
+    } else if (res.win) {
+      game.audio?.emit?.({ type: res.win.open ? 'WINDOW_OPEN' : 'WINDOW_CLOSE', x: ex, z: ez, intensity: 0.45, material: 'glass', source: id });
+    } else if (res.sound === 'drawer') {
+      game.audio?.emit?.({ type: 'WOOD_IMPACT', x: ex, z: ez, intensity: 0.4, material: 'wood' });
+    } else if (res.sound === 'pickup') {
+      game.audio?.emit?.({ type: 'OBJECT_DROP', x: ex, z: ez, intensity: 0.35 });
+    } else if (res.sound === 'bell') {
+      game.audio?.emit?.({ type: 'DOORBELL', x: ex, z: ez, intensity: 0.65 });
+      game.audio?.notifyLoud?.({ type: 'DOORBELL', source: id, x: ex, z: ez, intensity: 0.6 });
+    } else if (res.sound === 'phone') {
+      game.audio?.emit?.({ type: 'PHONE_RING', x: ex, z: ez, intensity: 0.55 });
+    }
+    if (res.light && entry?.light?.includes?.('bar')) {
+      game.audio?.emit?.({ type: 'ELECTRIC', x: ex, z: ez, intensity: 0.2 });
+    }
+  } catch { /* audio mai bloccante */ }
   if (res.msg) game.hud.toast(res.msg, 3200);
   const sync = (key) => {
     if (key && game.interactables[key] && game.interactMeshes) {
@@ -493,8 +643,18 @@ export function useInteractable(game, id) {
   sync(id); sync(res.loot); sync(res.taken);
   // S7+S8: stesso vano, due verità coerenti — ostacolo S7 + passaggio S8
   // (muri cavi con vani reali) + nav via colliderEpoch.
-  if (res.door) { refreshDoorColliders(game); setDoorPassage(id, res.door.open); }
-  if (res.win) setWindowPassage(id, res.win.open);
+  if (res.door) {
+    refreshDoorColliders(game); setDoorPassage(id, res.door.open);
+    driveFromTable(game.doors, id, res.door.open, game.interactables[id]?.lockedBy);
+  }
+  if (res.win) {
+    setWindowPassage(id, res.win.open);
+    driveWin(game.winRt, id, res.win.open);
+  }
+  if (res.light) {
+    const entry = game.interactables[id];
+    if (entry?.light) syncS8Light(game.renderer.scene, entry.light, res.light.on);
+  }
   if (res.noise) emitNoise(game, res.noise.x, res.noise.z, res.noise.radius, res.noise.severity);
   if (res.info) revealPhoneInfo(game);
   if (res.seat) {
