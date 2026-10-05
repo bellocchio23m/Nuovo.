@@ -66,6 +66,12 @@ export function makeNpc(def, rng) {
     state: 'dwell', // idle|walk|dwell|alerted|curious|dead
     agenda: def.agenda.map(a => ({ ...a })), agendaIdx: 0, dwellLeft: 2,
     path: [], pathIdx: 0, fleeNode: null,
+    // Stato della locomozione condivisa (locomotion.js). `pathGoal` e' la
+    // chiave dell'obiettivo corrente ("kind|x,z"); se cambia, il percorso viene
+    // ripiantificato dalla rete navigabile reale. `pathNavRev` lo invalida
+    // quando il mondo cambia (stesso obiettivo, nuovo percorso).
+    pathGoal: null, pathOk: true, pathExact: true, arriveR: 0.6, pathNavRev: 0,
+    stuckFor: 0, navX: def.x, navZ: def.z, navT: 0,
     gotoX: null, gotoZ: null, // destinazione diretta (curious/search, non da grafo)
     relations: { ...def.relations },   // id -> 0..1 (legame sociale)
     relType: { ...(def.relType ?? {}) }, // id -> family|friend|coworker|neighbor|enemy|acquaintance
@@ -167,7 +173,12 @@ export function serializeNpc(n) {
     id: n.id, x: n.x, z: n.z, yaw: n.yaw, speed: n.speed,
     state: n.state, agendaIdx: n.agendaIdx, dwellLeft: n.dwellLeft,
     agenda: n.agenda.map(a => ({ ...a })), agendaBlock: n.agendaBlock ?? null,
-    path: [...n.path], pathIdx: n.pathIdx, fleeNode: n.fleeNode,
+    // path = array di {x,z} (deep copy: le vecchie shallow-copy condividevano
+    // i waypoint e un ripianificazione sovrascriveva il resto del gruppo)
+    path: n.path.map(p => ({ x: p.x, z: p.z })), pathIdx: n.pathIdx, fleeNode: n.fleeNode,
+    pathGoal: n.pathGoal ?? null, pathOk: n.pathOk !== false, pathExact: n.pathExact !== false,
+    arriveR: n.arriveR ?? 0.6, pathNavRev: n.pathNavRev ?? 0,
+    stuckFor: n.stuckFor ?? 0, navX: n.navX ?? n.x, navZ: n.navZ ?? n.z, navT: n.navT ?? 0,
     relations: { ...n.relations }, relType: { ...(n.relType ?? {}) },
     memory: [...n.memory],
     memTier: { ...(n.memTier ?? {}) }, memAt: { ...(n.memAt ?? {}) },
@@ -191,7 +202,22 @@ export function restoreNpc(n, s) {
   n.x = s.x; n.z = s.z; n.yaw = s.yaw; n.speed = s.speed ?? 0;
   n.state = s.state; n.agendaIdx = s.agendaIdx; n.dwellLeft = s.dwellLeft;
   if (Array.isArray(s.agenda) && s.agenda.length) n.agenda = s.agenda.map(a => ({ ...a })); // v2 senza agenda: resta quella del roster
-  n.path = [...(s.path ?? [])]; n.pathIdx = s.pathIdx ?? 0; n.fleeNode = s.fleeNode ?? null;
+  // path: i save pre-locomozione contenevano id nodo (stringa): si butta via,
+  // il percorso viene ripiantificato dal tiro successivo. Nessun rimapping.
+  const rawPath = s.path ?? [];
+  n.path = rawPath.filter(p => p && typeof p === 'object' && Number.isFinite(p.x) && Number.isFinite(p.z))
+    .map(p => ({ x: p.x, z: p.z }));
+  // pathIdx e' preservato bit-per-bit quando il formato e' quello corrente;
+  // su save legacy (id nodo) e' irrilevante e viene azzerato.
+  n.pathIdx = n.path.length === rawPath.length ? (s.pathIdx ?? 0) : 0;
+  n.fleeNode = s.fleeNode ?? null;
+  n.pathGoal = s.pathGoal ?? null;
+  n.pathOk = s.pathOk !== false;
+  n.pathExact = s.pathExact !== false;
+  n.arriveR = s.arriveR ?? 0.6;
+  n.pathNavRev = s.pathNavRev ?? 0;
+  n.stuckFor = s.stuckFor ?? 0;
+  n.navX = s.navX ?? n.x; n.navZ = s.navZ ?? n.z; n.navT = s.navT ?? 0;
   n.relations = { ...s.relations };
   n.relType = { ...(s.relType ?? {}) }; // save v2 pre-relazioni: default vuoto
   n.agendaBlock = s.agendaBlock ?? null;

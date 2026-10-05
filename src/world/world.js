@@ -4,6 +4,28 @@ import { WORLD } from './mapData.js';
 // Collider AABB {minX,maxX,minZ,maxZ,id,tall}: tall=true ostruisce la vista
 // (muri, edifici, casse); panchine/lampioni/alberi no.
 
+// --- Ostacoli dinamici (porte chiuse, detriti, barricate) -------------------
+// La geometria del mondo puo' cambiare a runtime: ogni modifica incrementa
+// colliderEpoch, e la rete navigabile (world/navigation.js) si rasterizza da
+// capo e invalida la cache dei percorsi. Cosi' un passaggio bloccato produce
+// davvero un ricalcolo, non un NPC che continua a spingere contro il nuovo muro.
+let colliderEpochValue = 0;
+const dynObstacles = new Map();
+
+export function colliderEpoch() { return colliderEpochValue; }
+
+export function setWorldObstacle(id, r) {
+  dynObstacles.set(id, {
+    minX: r.minX, maxX: r.maxX, minZ: r.minZ, maxZ: r.maxZ,
+    id, tall: true, high: r.high !== false
+  });
+  colliderEpochValue++;
+}
+
+export function clearWorldObstacle(id) {
+  if (dynObstacles.delete(id)) colliderEpochValue++;
+}
+
 // Costruisce collider. Il bar ha mura sottili con apertura (porta);
 // gli altri edifici sono solidi.
 export function buildColliders() {
@@ -39,6 +61,7 @@ export function buildColliders() {
       cols.push({ minX: p.x - 1.1, maxX: p.x + 1.1, minZ: p.z - .4, maxZ: p.z + .4, id: 'prop', tall: false });
     }
   }
+  for (const o of dynObstacles.values()) cols.push({ ...o });
   return cols;
 }
 

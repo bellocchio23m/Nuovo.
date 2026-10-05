@@ -6,8 +6,9 @@ import { awarenessTick } from './awareness.js';
 import { footstepTick } from './noise.js';
 import { visibleForDiscovery } from './conceal.js';
 import { WORLD } from '../world/mapData.js';
-import { resolveCircle, losBlocked } from '../world/world.js';
+import { resolveCircle, losBlocked, colliderEpoch, buildColliders } from '../world/world.js';
 import { nearestNode, arrivalRadius } from '../world/navigation.js';
+import { routeTo, advance, abandon, anyReachableFlee } from './locomotion.js';
 
 // Scheduler a budget fisso con 3 livelli:
 // L1 (<=L1_RADIUS, max L1_CAP): movimento + percezione + think 4Hz.
@@ -41,6 +42,10 @@ const OBS_WINDOW = 2;
 export function makeSimulation(npcs, journal, colliders, navAdj, rng, hooks = {}) {
   return {
     t: 0, npcs, journal, colliders, navAdj, rng, hooks,
+    // epoca dei collider vista per l'ultimo rebuild: se il mondo fisico cambia
+    // (porta chiusa, detriti, barricata) la LOS e la risoluzione contatto lo
+    // vedono subito, non al prossimo riavvio.
+    colliderEpoch: colliderEpoch(),
     counts: { L1: 0, L2: 0, L3: 0 }, simMs: 0, aiMs: 0,
     unseen: [],
     grid: new Map(),
@@ -119,6 +124,13 @@ function ensureDiscovererKnows(sim, ev, finder, stumbled) {
 
 export function simTick(sim, player, dt) {
   const t0 = performance.now();
+  // Mondo fisico cambiato (porta/detriti/barricata): i collider usati da LOS
+  // e risoluzione contatto vengono allineati PRIMA di ogni altra operazione,
+  // cosi' il tick resta una funzione deterministica dello stato.
+  if (sim.colliderEpoch !== colliderEpoch()) {
+    sim.colliderEpoch = colliderEpoch();
+    sim.colliders = buildColliders();
+  }
   sim.t += dt;
   let c1 = 0, c2 = 0, c3 = 0;
 
@@ -250,18 +262,31 @@ export function simTick(sim, player, dt) {
       // una destinazione (l'NPC spingerebbe all'infinito contro il muro).
       const g = resolveCircle(n.gotoX, n.gotoZ, 0.35, sim.colliders);
       n.gotoX = g.x; n.gotoZ = g.z;
+      // stepToward segue la rete navigabile reale (A* sui collider), non una
+      // linea retta: la destinazione viene ripianificata se cambia il mondo.
       const arrived = stepToward(n, n.gotoX, n.gotoZ, dt, n.role === 'police' ? 2.4 : 1.7);
       if (arrived) { n.state = 'dwell'; n.dwellLeft = 3 + sim.rng.next() * 4; n.gotoX = null; n.gotoZ = null; }
     } else if (n.state === 'alerted' && n.fleeNode) {
       const node = WORLD.nodes[n.fleeNode];
-      const dx = node.x - n.x, dz = node.z - n.z, d = Math.hypot(dx, dz);
-      // arrivo fugge: soglia coerente col path (max con il minimo storico 1.5,
-      // raggio per-nodo dove il clearance lo richiede: mai stallo contro collider)
-      if (d < Math.max(1.5, arrivalRadius(n.fleeNode))) { n.state = 'dwell'; n.dwellLeft = 5; n.fleeNode = null; }
+      if (!node) { n.state = 'dwell'; n.dwellLeft = 5; n.fleeNode = null; }
       else {
-        const v = 2.6;
-        n.x += (dx / d) * v * dt; n.z += (dz / d) * v * dt;
-        n.yaw = Math.atan2(dx, dz); n.speed = v;
+        const arr = Math.max(1.5, arrivalRadius(n.fleeNode));
+        let p = routeTo(n, node.x, node.z, `flee|${n.fleeNode}`, arr);
+        if (!p.ok) {
+          // la destinazione scelta e' diventata irraggiungibile (muro/ostacolo
+          // aggiunto): alternativa concreta e' scelta qui dentro — mai una
+          // linea retta verso un punto dietro il muro, mai un ciclo.
+          const alt = anyReachableFlee(n);
+          if (alt) { n.fleeNode = alt.id; p = routeTo(n, alt.x, alt.z, `flee|${alt.id}`, Math.max(1.5, arrivalRadius(alt.id))); }
+          else { n.state = 'dwell'; n.dwellLeft = 5; n.fleeNode = null; p = null; }
+        }
+        if (p) {
+          const st = advance(n, dt, 2.6);
+          if (st !== 'moving') {
+            if (st === 'stalled') abandon(n);
+            n.state = 'dwell'; n.dwellLeft = 5; n.fleeNode = null;
+          }
+        }
       }
     } else {
       stepAlongPath(n, dt, 1.6);

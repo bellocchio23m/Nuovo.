@@ -2,16 +2,18 @@
 // Uso: npm test  (nessun browser/IndexedDB necessari)
 import { runAllTests } from './harness.js';
 import { runInfraTests } from './infra.js';
+import { runLocomotionTests } from './locomotion.js';
 
 const foundation = await runAllTests();
 const infra = runInfraTests();
-const all = [...foundation.tests, ...infra.tests];
+const locomotion = runLocomotionTests();
+const all = [...foundation.tests, ...infra.tests, ...locomotion.tests];
 const failed = all.filter(t => !t.pass);
 const summary = {
   total: all.length,
   passed: all.length - failed.length,
   failed: failed.length,
-  suites: [foundation.suite, infra.suite],
+  suites: [foundation.suite, infra.suite, locomotion.suite],
   failures: failed.map(t => ({ name: t.name, detail: t.detail }))
 };
 console.log(JSON.stringify(summary, null, 1));

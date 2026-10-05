@@ -1,5 +1,6 @@
 import { WORLD } from '../world/mapData.js';
-import { findPath, nearestNode, arrivalRadius } from '../world/navigation.js';
+import { nearestNode, arrivalRadius } from '../world/navigation.js';
+import { routeTo, advance, abandon, pickFlee, fleeOccupancy } from './locomotion.js';
 import { makeBelief, mergeBelief, effectiveConfidence, CONF_MIN } from './knowledge.js';
 import { memorize, bondOf, infoFactorOf, mournOf, relTypeOf, REL_TYPES } from './npc.js';
 import { policeThink } from './police.js';
@@ -106,12 +107,15 @@ export function think(npc, ctx) {
         }
         npc.state = b.channel === 'seen' ? 'alerted' : 'dwell';
         npc.dwellLeft = 4 + rng.next() * 4;
-        let best = null, bd = -1;
-        for (const [k, n] of Object.entries(WORLD.nodes)) {
-          const d = (n.x - b.px) ** 2 + (n.z - b.pz) ** 2;
-          if (d > bd) { bd = d; best = k; }
-        }
-        npc.fleeNode = best;
+        // Destinazione di fuga: lontana dalla minaccia MA dispersa (gli altri
+        // fuggono gia' verso alcuni nodi -> penalita' di affollamento + scarto
+        // deterministico per identita'). Verifica di percorribilita' reale:
+        // se il nodo non e' raggiungibile se ne sceglie un altro, mai una
+        // linea retta verso un punto dietro un muro.
+        const occ = fleeOccupancy(ctx.nearby(npc, 45));
+        const dest = pickFlee(npc, b.px, b.pz, occ);
+        npc.fleeNode = dest ? dest.id : null;
+        if (!npc.fleeNode) { npc.state = 'dwell'; npc.dwellLeft = 6; }
         return;
       }
     }
@@ -237,48 +241,51 @@ export function think(npc, ctx) {
         }
       }
       if (npc.dwellLeft <= 0) {
-        const from = nearestNode(npc.x, npc.z);
-        npc.path = findPath(navAdj, from, step.node);
-        npc.pathIdx = 0;
-        // Salto del primo nodo SOLO se entro il suo raggio di arrivo: la
-        // vecchia soglia fissa 1.5 superava gli arrivalRadius piccoli
-        // (es. 0.6) e dichiarava arrivi a 1.5m dal nodo (stallo apparente).
-        const n0 = WORLD.nodes[npc.path[0]];
-        if (n0 && Math.hypot(n0.x - npc.x, n0.z - npc.z) < arrivalRadius(npc.path[0])) npc.pathIdx = 1;
-        npc.state = 'walk';
-        ctx.stats.pathComputations++;
+        // Il grafo semantico dice DOVE (step.node); il percorso lo calcola la
+        // rete navigabile reale dal punto in cui l'NPC si trova davvero.
+        const goal = WORLD.nodes[step.node];
+        const kind = `walk|${step.node}|${npc.agendaIdx}`;
+        if (!goal) {
+          npc.agendaIdx++;
+        } else if (routeTo(npc, goal.x, goal.z, kind, arrivalRadius(step.node)).ok) {
+          npc.state = 'walk';
+          ctx.stats.pathComputations++;
+        } else {
+          // destinazione non raggiungibile: passo oltre invece di bloccarsi
+          npc.agendaIdx++;
+          npc.dwellLeft = 0.5;
+        }
       }
     }
   }
 }
 
-// Avanzamento lungo il path. A esaurimento: agenda avanza, dwell dello step.
+// Avanzamento lungo il percorso navigabile. A esaurimento (o stallo):
+// l'agenda avanza e lo step entra in dwell. Nessuno stato spinge all'infinito.
 export function stepAlongPath(npc, dt, speed) {
-  if (npc.pathIdx >= npc.path.length) {
-    const step = npc.agenda[npc.agendaIdx % npc.agenda.length];
+  if (!npc.agenda || !npc.agenda.length) { npc.state = 'dwell'; npc.dwellLeft = 1; return; }
+  const step = npc.agenda[npc.agendaIdx % npc.agenda.length];
+  const goal = WORLD.nodes[step.node];
+  if (!goal) { npc.agendaIdx++; npc.state = 'dwell'; npc.dwellLeft = step.dwell; return; }
+  const kind = `walk|${step.node}|${npc.agendaIdx}`;
+  const p = routeTo(npc, goal.x, goal.z, kind, arrivalRadius(step.node));
+  if (!p.ok) { npc.agendaIdx++; npc.state = 'dwell'; npc.dwellLeft = step.dwell; abandon(npc); return; }
+  const st = advance(npc, dt, speed);
+  if (st !== 'moving') {
+    if (st === 'stalled') abandon(npc);
     npc.agendaIdx++;
     npc.state = 'dwell';
     npc.dwellLeft = step.dwell;
-    return;
   }
-  const n = WORLD.nodes[npc.path[npc.pathIdx]];
-  const dx = n.x - npc.x, dz = n.z - npc.z;
-  const d = Math.hypot(dx, dz);
-  if (d < arrivalRadius(npc.path[npc.pathIdx])) { npc.pathIdx++; return; }
-  const v = Math.min(speed, d / dt);
-  npc.x += (dx / d) * v * dt; npc.z += (dz / d) * v * dt;
-  npc.yaw = Math.atan2(dx, dz);
-  npc.speed = v;
 }
 
-// Steering diretto verso un punto (curious/inseguimento). Ritorna true se arrivato.
+// Movimento verso un punto arbitrario (curious/inseguimento polizia): segue la
+// rete navigabile, mai una linea retta. true = arrivato (o nessun percorso).
 export function stepToward(npc, tx, tz, dt, speed) {
-  const dx = tx - npc.x, dz = tz - npc.z;
-  const d = Math.hypot(dx, dz);
-  if (d < 1.0) { npc.speed = 0; return true; }
-  const v = Math.min(speed, d / dt);
-  npc.x += (dx / d) * v * dt; npc.z += (dz / d) * v * dt;
-  npc.yaw = Math.atan2(dx, dz);
-  npc.speed = v;
-  return false;
+  const p = routeTo(npc, tx, tz, 'goto', 1.0);
+  if (!p.ok) return true; // nessun percorso: ci si ferma, non si spinge sul muro
+  const st = advance(npc, dt, speed);
+  if (st === 'moving') return false;
+  if (st === 'stalled') abandon(npc);
+  return true;
 }
