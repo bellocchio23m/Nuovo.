@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<link rel="icon" href="data:,">
+<title>Quartiere P0 — prototipo sistemico</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0e14;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #e8e8e8; }
+  #app { position: fixed; inset: 0; }
+  #app canvas { display: block; width: 100%; height: 100%; }
+  .overlay { position: fixed; z-index: 10; }
+  #start-screen { inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(5,8,14,.88); padding: 20px; }
+  #start-screen .card { max-width: 560px; background: #141a26; border: 1px solid #2c3a55;
+    border-radius: 12px; padding: 24px; }
+  #start-screen h1 { font-size: 1.3rem; margin-bottom: 10px; }
+  #start-screen p { font-size: .9rem; line-height: 1.55; color: #c4ccd9; margin-bottom: 8px; }
+  #start-screen .row { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  button { background: #2fbf71; color: #06281a; border: 0; border-radius: 8px;
+    font-weight: 700; padding: 10px 16px; cursor: pointer; font-size: .95rem; }
+  button.secondary { background: #26314a; color: #dbe4f3; }
+  button:active { transform: translateY(1px); }
+  #hud-top { top: 10px; left: 10px; right: 10px; display: flex; gap: 8px; align-items: flex-start;
+    justify-content: space-between; pointer-events: none; }
+  #objective { background: rgba(10,14,22,.78); border: 1px solid #2c3a55; border-radius: 8px;
+    padding: 8px 12px; font-size: .82rem; max-width: 46ch; pointer-events: auto; }
+  #prompt { background: rgba(10,14,22,.85); border: 1px solid #2fbf71; border-radius: 8px;
+    padding: 8px 12px; font-size: .85rem; display: none; pointer-events: auto; }
+  #hud-buttons { top: 10px; right: 10px; display: none; }
+  #panel { top: 64px; right: 10px; width: min(360px, 92vw); max-height: 70vh; overflow: auto;
+    background: rgba(10,14,22,.92); border: 1px solid #2c3a55; border-radius: 10px;
+    padding: 12px; font-size: .78rem; display: none; }
+  #panel h3, #notebook h3 { font-size: .85rem; margin: 8px 0 4px; color: #8fd6ff; }
+  #notebook { top: auto; bottom: 12px; left: 10px; width: min(340px, 92vw); max-height: 60vh; overflow: auto;
+    background: rgba(12,14,10,.94); border: 1px solid #5a6a3a; border-radius: 10px;
+    padding: 12px; font-size: .78rem; display: none; }
+  #notebook .who { border-top: 1px solid #334; padding: 4px 0; }
+  #panel .ev { border-top: 1px solid #223; padding: 4px 0; }
+  #panel .bel { border-top: 1px solid #223; padding: 4px 0; }
+  #debug { left: 10px; bottom: 10px; background: rgba(0,0,0,.72); border: 1px solid #334;
+    border-radius: 8px; padding: 8px 10px; font-size: .72rem; font-family: monospace;
+    white-space: pre; display: none; }
+  #toast { left: 50%; bottom: 88px; transform: translateX(-50%); background: rgba(10,14,22,.9);
+    border: 1px solid #2fbf71; padding: 8px 14px; border-radius: 8px; font-size: .85rem; display: none; }
+  #touch { inset: auto 0 0 0; display: none; justify-content: space-between; align-items: flex-end;
+    padding: 0 14px 16px; pointer-events: none; }
+  #joy { width: 120px; height: 120px; border-radius: 50%; border: 2px solid #3a4a68;
+    background: rgba(20,28,44,.5); pointer-events: auto; position: relative; }
+  #stick { width: 52px; height: 52px; border-radius: 50%; background: #2fbf71;
+    position: absolute; left: 34px; top: 34px; }
+  #touch-btns { display: flex; gap: 10px; pointer-events: auto; }
+  #touch-btns button { width: 56px; height: 56px; border-radius: 50%; font-size: 1rem; padding: 0; }
+  #caught h1 { font-size: 1.2rem; margin-bottom: 10px; }
+  #caught p { font-size: .9rem; line-height: 1.55; color: #e8c4c4; margin-bottom: 8px; }
+  #caught .row { display: flex; gap: 10px; margin-top: 14px; }
+  #caught { inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(20,4,4,.9); padding: 20px; }
+  #caught .card { max-width: 480px; background: #241114; border: 1px solid #7a2a2a;
+    border-radius: 12px; padding: 24px; }
+  @media (pointer: coarse) { #touch { display: flex; } }
+  @media (max-width: 640px) {
+    #hud-top { top: 54px; }
+    #objective { max-width: 100%; font-size: .75rem; }
+    #panel { top: 200px; }
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="hud-top" class="overlay" style="display:none">
+  <div id="objective"><b>CONTRATTO: Marco</b> — maglia rossa, frequenta bar e piazza. Studialo (osserva, segui, parla), trova il momento isolato, agisci, sparisci. <b>E</b> interagisci · <b>F</b> colpisci · <b>Q</b> fischio · <b>C</b> accovacciati · <b>N</b> taccuino · <b>F3</b> debug.</div>
+  <div id="prompt"></div>
+</div>
+
+<div id="hud-buttons" class="overlay">
+  <button class="secondary" id="btn-panel" style="padding:6px 10px;font-size:.8rem">Verità/credenze (J)</button>
+  <button class="secondary" id="btn-save" style="padding:6px 10px;font-size:.8rem">Salva</button>
+</div>
+
+<div id="panel" class="overlay"></div>
+<div id="notebook" class="overlay"></div>
+<div id="debug" class="overlay"></div>
+<div id="toast" class="overlay"></div>
+
+<div id="touch" class="overlay">
+  <div id="joy"><div id="stick"></div></div>
+  <div id="touch-btns">
+    <button id="btn-act" class="secondary">E</button>
+    <button id="btn-fight" class="secondary">F</button>
+    <button id="btn-whistle" class="secondary">Q</button>
+    <button id="btn-crouch" class="secondary">C</button>
+    <button id="btn-run" class="secondary">»</button>
+  </div>
+</div>
+
+<div id="caught" class="overlay">
+  <div class="card">
+    <h1>Identificato e fermato</h1>
+    <p>La polizia ti ha collegato al delitto e ti ha bloccato. Uccidere non basta: dovevi restare sconosciuto.</p>
+    <div class="row"><button id="btn-retry">Ricomincia il contratto</button></div>
+  </div>
+</div>
+
+<div id="start-screen" class="overlay">
+  <div class="card">
+    <h1>Il Quartiere — contratto su Marco</h1>
+    <p>Sei un professionista. Il bersaglio è <b>Marco (maglia rossa)</b>: vive sopra il palazzo a est, frequenta bar e piazza. Nessuno ti dirà dove si trova: <b>osservalo, seguilo, impara le sue abitudini</b> e scegli il momento.</p>
+    <p>Se qualcuno ti vede agire, lo saprà. Se la polizia risale a te, ti darà la caccia. Uccidere non basta: devi restare sconosciuto.</p>
+    <p>WASD muovi · mouse camera · Maiusc corri · <b>C</b> accovacciati · <b>E</b> parla/usa · <b>F</b> colpisci · <b>Q</b> fischia per attirare · <b>N</b> taccuino · <b>J</b> verità/credenze (debug) · <b>F3</b> diagnostica.</p>
+    <div class="row">
+      <button id="btn-new">Nuova partita</button>
+      <button id="btn-continue" class="secondary">Continua (carica save)</button>
+    </div>
+    <p id="start-msg" style="margin-top:10px;color:#8fd6ff"></p>
+  </div>
+</div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
