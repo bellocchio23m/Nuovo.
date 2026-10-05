@@ -3,17 +3,19 @@
 import { runAllTests } from './harness.js';
 import { runInfraTests } from './infra.js';
 import { runLocomotionTests } from './locomotion.js';
+import { runInteractionTests } from './interactions.js';
 
 const foundation = await runAllTests();
 const infra = runInfraTests();
 const locomotion = runLocomotionTests();
-const all = [...foundation.tests, ...infra.tests, ...locomotion.tests];
+const interactions = runInteractionTests();
+const all = [...foundation.tests, ...infra.tests, ...locomotion.tests, ...interactions.tests];
 const failed = all.filter(t => !t.pass);
 const summary = {
   total: all.length,
   passed: all.length - failed.length,
   failed: failed.length,
-  suites: [foundation.suite, infra.suite, locomotion.suite],
+  suites: [foundation.suite, infra.suite, locomotion.suite, interactions.suite],
   failures: failed.map(t => ({ name: t.name, detail: t.detail }))
 };
 console.log(JSON.stringify(summary, null, 1));

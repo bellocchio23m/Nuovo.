@@ -55,6 +55,16 @@ export function makeAudio() {
       A.stingT = setTimeout(() => { A.stingT = 0; A.tone(554, 0.4, 'sawtooth', 0.4, 220); }, 180);
     },
     scream() { A.tone(900, 0.3, 'sawtooth', 0.35, 500); },
+    // S7 — feedback sonoro delle interazioni (sintetizzato, nessun asset)
+    door() { A.noiseBurst(0.15, 0.4, 700); A.tone(140, 0.18, 'triangle', 0.5, -40); },
+    window() { A.noiseBurst(0.1, 0.25, 2000); A.tone(500, 0.1, 'triangle', 0.25, 120); },
+    drawer() { A.noiseBurst(0.18, 0.35, 900); },
+    pickup() { A.tone(660, 0.09, 'sine', 0.5); setTimeout(() => A.tone(990, 0.12, 'sine', 0.5), 90); },
+    switch_() { A.tone(1200, 0.05, 'square', 0.25); },
+    sit() { A.noiseBurst(0.12, 0.3, 400); },
+    phone() { A.tone(440, 0.15, 'sine', 0.4); setTimeout(() => A.tone(480, 0.15, 'sine', 0.4), 200); },
+    bell() { A.tone(880, 0.5, 'sine', 0.5, -80); setTimeout(() => A.tone(880, 0.5, 'sine', 0.4, -80), 350); },
+    locked() { A.tone(180, 0.12, 'square', 0.35); setTimeout(() => A.tone(150, 0.15, 'square', 0.35), 140); },
     ambience() {
       // vento/citta': rumore filtrato in loop a basso volume
       const len = A.ctx.sampleRate * 2;

@@ -1,4 +1,43 @@
 import { WORLD } from './mapData.js';
+import { allStaticColliders, allDoors, allWindows, doorLeafRect } from './buildings.js';
+
+// --- Passaggi di porte/finestre (S8) ----------------------------------------
+// Ogni porta ha un vano nel muro; il battente CHIUSO ostruisce davvero, da
+// APERTO il passaggio e' libero (stessa verita' per fisica e navigazione:
+// la griglia nav si rasterizza da questi collider). Lo stato iniziale
+// deriva dalle definizioni (porte 'open' = libere); game.js chiama
+// setDoorPassage() a ogni apertura/chiusura (incrementa colliderEpoch,
+// quindi la nav si ricostruisce e i percorsi si ricalcolano).
+const doorOpen = new Map();
+let doorInit = false;
+function ensureDoorInit() {
+  if (doorInit) return;
+  for (const d of allDoors()) doorOpen.set(d.id, d.state === 'open');
+  doorInit = true;
+}
+
+/** true se il vano della porta e' attraversabile. */
+export function isDoorOpen(id) {
+  ensureDoorInit();
+  return doorOpen.get(id) ?? true;
+}
+
+/** Apre/chiude il passaggio di una porta (bump epoch solo se cambia). */
+export function setDoorPassage(id, open) {
+  ensureDoorInit();
+  if ((doorOpen.get(id) ?? true) === open) return;
+  doorOpen.set(id, open);
+  colliderEpochValue++;
+}
+
+/** Come setDoorPassage ma per finestre passabili (id finestra). */
+const winOpen = new Map();
+export function setWindowPassage(id, open) {
+  if ((winOpen.get(id) ?? false) === open) return;
+  winOpen.set(id, open);
+  colliderEpochValue++;
+}
+function isWindowOpen(id) { return winOpen.get(id) ?? false; }
 
 // Fisica 2D del mondo (nessuna dipendenza three.js: usabile anche headless).
 // Collider AABB {minX,maxX,minZ,maxZ,id,tall}: tall=true ostruisce la vista
@@ -26,23 +65,38 @@ export function clearWorldObstacle(id) {
   if (dynObstacles.delete(id)) colliderEpochValue++;
 }
 
-// Costruisce collider. Il bar ha mura sottili con apertura (porta);
-// gli altri edifici sono solidi.
+// Costruisce collider. Il bar ha mura sottili con aperture (porte);
+// b2..b5 hanno gusci cavi con tramezzi, mobili e scale (v. buildings.js);
+// i battenti chiusi ostruiscono il proprio vano (porte/finestre passabili).
 export function buildColliders() {
+  ensureDoorInit();
   const cols = [];
+  // --- gusci perimetrali S8 (b2,b3,b4,b5): muri con vani porta ---
+  // (le impronte restano quelle di mapData.js)
+  const S8 = new Set(['b2', 'b3', 'b4', 'b5']);
   for (const b of WORLD.buildings) {
+    if (S8.has(b.id)) continue; // sotto, da buildings.js (tramezzi inclusi)
     const hx = b.w / 2, hz = b.d / 2;
     if (!b.interior) {
       cols.push({ minX: b.x - hx, maxX: b.x + hx, minZ: b.z - hz, maxZ: b.z + hz, id: b.id, tall: true, high: true });
       continue;
     }
-    const t = 0.4, dw = b.door.width / 2, dx = b.door.at;
-    const zS = b.z - hz, zN = b.z + hz, xW = b.x - hx, xE = b.x + hx;
-    cols.push({ minX: xW, maxX: dx - dw, minZ: zS - t / 2, maxZ: zS + t / 2, id: 'bar_s1', tall: true, high: true });
-    cols.push({ minX: dx + dw, maxX: xE, minZ: zS - t / 2, maxZ: zS + t / 2, id: 'bar_s2', tall: true, high: true });
-    cols.push({ minX: xW, maxX: xE, minZ: zN - t / 2, maxZ: zN + t / 2, id: 'bar_n', tall: true, high: true });
-    cols.push({ minX: xW - t / 2, maxX: xW + t / 2, minZ: zS, maxZ: zN, id: 'bar_w', tall: true, high: true });
-    cols.push({ minX: xE - t / 2, maxX: xE + t / 2, minZ: zS, maxZ: zN, id: 'bar_e', tall: true, high: true });
+    void b; // bar e corpi S8: interamente da buildings.js (sotto)
+  }
+  // --- interni S8: gusci, tramezzi, mobili (stessa fonte del rendering) ---
+  for (const w of allStaticColliders()) {
+    cols.push({ minX: w.minX, maxX: w.maxX, minZ: w.minZ, maxZ: w.maxZ, id: w.id, tall: true, high: w.high !== false });
+  }
+  // --- battenti chiusi (porte) e finestre passabili chiuse: ostruiscono ---
+  for (const d of allDoors()) {
+    if (isDoorOpen(d.id)) continue;
+    const r = doorLeafRect(d);
+    cols.push({ ...r, id: 'door:' + d.id, tall: true, high: true });
+  }
+  for (const w of allWindows()) {
+    if (!w.passable || isWindowOpen(w.id)) continue;
+    const r = doorLeafRect(w);
+    cols.push({ ...r, id: 'win:' + w.id, tall: true, high: true });
   }
   for (const w of WORLD.coverWalls ?? []) {
     cols.push({ minX: w.x - w.w / 2, maxX: w.x + w.w / 2, minZ: w.z - w.d / 2, maxZ: w.z + w.d / 2, id: 'cover', tall: true, high: true });

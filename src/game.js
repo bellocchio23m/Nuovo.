@@ -2,14 +2,16 @@ import * as THREE from 'three';
 import { makeRng } from './core/rng.js';
 import { makeJournal } from './core/events.js';
 import { WORLD, initialInteractables } from './world/mapData.js';
-import { buildColliders, pointInBuilding } from './world/world.js';
+import { buildColliders, pointInBuilding, setWorldObstacle, clearWorldObstacle, setDoorPassage, setWindowPassage } from './world/world.js';
+import { interactionInitialStates, nearestInteractable, promptFor, activate as activateInteract, doorObstacle } from './world/interactions.js';
+import { buildInteractionObjects, syncInteractionMesh, syncAllInteractionMeshes, tickInteractionMeshes } from './render/interactionMeshes.js';
 import { buildNavGraph, validateNav } from './world/navigation.js';
 import { makeNpc } from './sim/npc.js';
 import { ROSTER } from './sim/roster.js';
 import { makeSimulation, simTick, publishEvent } from './sim/simulation.js';
 import { makeInput } from './player/input.js';
 import { makePlayer, updatePlayer } from './player/player.js';
-import { makeRenderer, makeHumanoid, animateHumanoid } from './render/renderer.js';
+import { makeRenderer, makeHumanoid, animateHumanoid, noteCamera } from './render/renderer.js';
 import { saveGame } from './persist/persistence.js';
 import { makeHud } from './ui/hud.js';
 import { makeAudio } from './audio/audio.js';
@@ -32,7 +34,8 @@ export function makeGame(seed) {
     navAdj: buildNavGraph(),
     npcs: [], player: makePlayer(37, 2), // strada sud: vista verso vicolo/piazza
     pk: makePlayerKnowledge(), // ciò che il GIOCATORE ha osservato (mai onnisciente)
-    interactables: initialInteractables(),
+    // S7: affordance persistite con il sistema esistente (nessun secondo save).
+    interactables: { ...initialInteractables(), ...interactionInitialStates() },
     caught: false,
     contract: makeContract('marco', 900), // finestra temporale: 900s di gioco
     ended: null, // null | 'caught' | 'window' | 'done' (esito del contratto)
@@ -76,15 +79,21 @@ export function makeGame(seed) {
   markIntroduced(game.pk, 'marco'); // briefing: il contratto dice chi è il bersaglio
 
   game.renderer = makeRenderer(document.getElementById('app'));
-  game.player.mesh = makeHumanoid(0x2fbf71, true, 'player');
+  noteCamera(game.renderer.camera); // LOD personaggi proporzionato alla distanza
+  game.player.mesh = makeHumanoid(0x2fbf71, true, 'player', { id: 'player', role: 'player' });
   game.renderer.scene.add(game.player.mesh);
   for (const n of game.npcs) {
-    n.mesh = makeHumanoid(n.color, false, n.role);
+    // identita' visiva deterministica legata all'npc (stessa persona dopo save/replay)
+    n.mesh = makeHumanoid(n.color, false, n.role, n);
     n.mesh.position.set(n.x, 0, n.z);
     game.renderer.scene.add(n.mesh);
   }
   game.pkg = null; // P1: niente pacco-demo
   game.syncInteractables = () => syncInteractables(game);
+  // S7: porte chiuse = ostacoli reali (fisica + nav via colliderEpoch), poi mesh
+  refreshDoorColliders(game);
+  game.interactMeshes = buildInteractionObjects(game.renderer.scene, game.interactables);
+  syncAllInteractionMeshes(game.interactMeshes.refs, game.interactables);
 
   game.inputHandle = makeInput();
   game.input = game.inputHandle.api;
@@ -114,7 +123,7 @@ export function spawnExtra(game, n) {
   const defs = synthRoster(game.rng, n).filter(d => !game.npcs.some(x => x.id === d.id));
   for (const def of defs) {
     const npc = makeNpc(def, game.rng);
-    npc.mesh = makeHumanoid(0x999999, false, 'civilian');
+    npc.mesh = makeHumanoid(0x999999, false, 'civilian', npc);
     npc.mesh.position.set(npc.x, 0, npc.z);
     game.renderer.scene.add(npc.mesh);
     game.npcs.push(npc);
@@ -279,7 +288,14 @@ export function frame(game, rawDt) {
   game.camYaw -= lk.dx * 0.005;
   game.camPitch = Math.max(0.08, Math.min(1.1, game.camPitch + lk.dy * 0.003));
 
-  updatePlayer(game.player, game.input, game.camYaw, dt, game.colliders);
+  // S7: da seduto non ci si muove; qualsiasi input di movimento fa alzare.
+  if (game.player.seated) {
+    const ax = game.input.axis();
+    if (Math.abs(ax.x) > 0.1 || Math.abs(ax.z) > 0.1) standUp(game);
+    else game.player.speed = 0;
+  } else {
+    updatePlayer(game.player, game.input, game.camYaw, dt, game.colliders);
+  }
   // passi: audio proporzionale alla distanza percorsa
   game.stepAcc = (game.stepAcc ?? 0) + game.player.speed * dt;
   const stride = game.player.crouch ? 1.6 : (game.player.running ? 2.6 : 2.0);
@@ -311,20 +327,28 @@ export function frame(game, rawDt) {
     }
   }
 
-  // interazione contestuale
+  // interazione contestuale (S7: mondo + NPC; vince il piu' vicino)
   const tgt = findInteract(game);
   game.player.interactTarget = tgt;
   const st = game.interactables.yardstack;
   const nearStack = Math.hypot(game.player.x - st.x, game.player.z - st.z) < 2.8;
   const corpse = findCorpseNear(game.sim, game.player.x, game.player.z, 2.2);
+  const worldTgt = game.player.seated ? null
+    : nearestInteractable(game.interactables, game.player.x, game.player.z, 3.0, 0);
+  const npcD = tgt ? Math.hypot(tgt.npc.x - game.player.x, tgt.npc.z - game.player.z) : 1e9;
+  const worldD = worldTgt ? Math.hypot(worldTgt.x - game.player.x, worldTgt.z - game.player.z) : 1e9;
+  const useWorld = worldTgt && worldD <= npcD;
   if (corpse) game.hud.setPrompt('Premi <b>E</b> per nascondere il corpo');
   else if (nearStack && st.state === 'ok') game.hud.setPrompt('Premi <b>E</b> per sabotare la catasta');
+  else if (useWorld) game.hud.setPrompt(promptFor(worldTgt));
   else if (tgt) game.hud.setPrompt(`Premi <b>E</b> per parlare con <b>${tgt.npc.name}</b> · <b>F</b> colpisci`);
   else game.hud.setPrompt(null);
   if (game.input.wasPressed('KeyE')) {
     if (corpse && concealCorpse(game.sim, corpse)) game.hud.toast('🩸 Corpo nascosto: nessuno lo troverà guardandolo da lontano');
     else if (nearStack && st.state === 'ok') sabotage(game);
+    else if (useWorld) useInteractable(game, worldTgt.id);
     else if (tgt) talkTo(game, tgt.npc);
+    else if (game.player.seated) standUp(game);
   }
   if (game.input.wasPressed('KeyF')) attack(game);
   if (game.input.wasPressed('KeyQ')) whistle(game);
@@ -360,16 +384,19 @@ export function frame(game, rawDt) {
 
   // sync mesh + camera follow
   const pm = game.player.mesh;
-  pm.position.set(game.player.x, bob(game.player), game.player.z);
+  pm.position.set(game.player.x, game.player.seated ? -0.32 : bob(game.player), game.player.z);
   pm.rotation.y = game.player.yaw;
-  pm.scale.y = game.player.crouch ? 0.8 : 1;
-  animateHumanoid(pm, game.player.speed, game.sim.t,
-    (game.sim.t - (game.player.attackT ?? -99)) < 0.45);
+  animateHumanoid(pm, game.player.seated ? 0 : game.player.speed, game.sim.t,
+    (game.sim.t - (game.player.attackT ?? -99)) < 0.45,
+    { crouch: !!game.player.crouch || !!game.player.seated });
   for (const n of game.npcs) {
     n.mesh.position.set(n.x, n.state === 'dead' ? 0.35 : bob(n), n.z);
     n.mesh.rotation.y = n.yaw;
     n.mesh.rotation.z = n.state === 'dead' ? Math.PI / 2 : 0; // corpo a terra
-    if (n.state !== 'dead') animateHumanoid(n.mesh, n.speed, game.sim.t, false);
+    if (n.state !== 'dead') animateHumanoid(n.mesh, n.speed, game.sim.t, false, {
+      talk: (game.sim.t - (n.talkT ?? -99)) < 2.5, // conversazione/gossip in corso
+      alert: n.state === 'alerted' || n.state === 'curious',
+    });
     const recent = (game.sim.t - (n.alertT ?? -99)) < 20;
     const susp = (game.sim.t - (n.suspT ?? -99)) < 3;
     n.mesh.userData.mark.visible = n.state !== 'dead' &&
@@ -395,6 +422,11 @@ export function frame(game, rawDt) {
   const cy = indoor ? 2.5 : Math.sin(game.camPitch) * cd * t + 1.6;
   game.renderer.camera.position.set(cx, cy, cz);
   game.renderer.camera.lookAt(game.player.x + fx * 2.2, 1.2, game.player.z + fz * 2.2);
+  // S7: animazioni interazioni (solo vicino al player) + anello di highlight
+  if (game.interactMeshes) {
+    tickInteractionMeshes(game.interactMeshes.refs, game.interactMeshes.ring,
+      dt, game.player.x, game.player.z, useWorld ? worldTgt.id : null);
+  }
   game.renderer.renderer.render(game.renderer.scene, game.renderer.camera);
   game.hud.tickToast();
 }
@@ -411,16 +443,93 @@ export function syncInteractables(game) {
   const st = game.interactables.yardstack;
   const top = game.renderer.scene.getObjectByName('yardstack_top');
   const base = game.renderer.scene.getObjectByName('yardstack');
-  if (!top || !base) return;
-  if (st.state === 'fallen') {
-    base.rotation.x = Math.PI / 2 - 0.15; base.position.y = 0.6;
-    top.rotation.x = Math.PI / 2; top.position.y = 0.4;
-  } else if (st.state === 'armed') {
-    top.rotation.z = 0.28; // visibilmente instabile: indizio nel mondo
-  } else {
-    base.rotation.x = 0; base.position.y = 1.2;
-    top.rotation.x = 0; top.rotation.z = 0; top.position.y = 2.9;
+  if (top && base) {
+    if (st.state === 'fallen') {
+      base.rotation.x = Math.PI / 2 - 0.15; base.position.y = 0.6;
+      top.rotation.x = Math.PI / 2; top.position.y = 0.4;
+    } else if (st.state === 'armed') {
+      top.rotation.z = 0.28; // visibilmente instabile: indizio nel mondo
+    } else {
+      base.rotation.x = 0; base.position.y = 1.2;
+      top.rotation.x = 0; top.rotation.z = 0; top.position.y = 2.9;
+    }
   }
+  // S7: porte/finestre/contenitori/luci/veicoli (chiamato anche dopo il load)
+  if (game.interactMeshes) {
+    refreshDoorColliders(game);
+    syncAllInteractionMeshes(game.interactMeshes.refs, game.interactables);
+  }
+}
+
+// --- S7: porte chiuse = ostacoli reali (fisica via game.colliders,
+// navigazione via colliderEpoch invalidazione cache). ---
+export function refreshDoorColliders(game) {
+  for (const d of Object.values(game.interactables)) {
+    if (d.kind !== 'door') continue;
+    const open = d.state === 'open';
+    if (open) clearWorldObstacle('door:' + d.id);
+    else setWorldObstacle('door:' + d.id, doorObstacle(d));
+    setDoorPassage(d.id, open); // S8: vano reale nel muro cavo (vale anche al load)
+  }
+  game.colliders = buildColliders();
+}
+
+const INTERACT_SOUNDS = {
+  door: 'door', window: 'window', drawer: 'drawer', pickup: 'pickup',
+  switch: 'switch_', sit: 'sit', phone: 'phone', bell: 'bell', locked: 'locked',
+};
+
+// Esegue un'interazione del mondo: stato + collider + mesh + audio + effetti
+// sistemici (rumore per chi sente, info nel taccuino). Ritorna l'esito.
+export function useInteractable(game, id) {
+  const res = activateInteract(game.interactables, id);
+  if (res.sound && INTERACT_SOUNDS[res.sound]) game.audio?.[INTERACT_SOUNDS[res.sound]]?.();
+  if (res.msg) game.hud.toast(res.msg, 3200);
+  const sync = (key) => {
+    if (key && game.interactables[key] && game.interactMeshes) {
+      syncInteractionMesh(game.interactMeshes.refs, game.interactables, key);
+    }
+  };
+  sync(id); sync(res.loot); sync(res.taken);
+  // S7+S8: stesso vano, due verità coerenti — ostacolo S7 + passaggio S8
+  // (muri cavi con vani reali) + nav via colliderEpoch.
+  if (res.door) { refreshDoorColliders(game); setDoorPassage(id, res.door.open); }
+  if (res.win) setWindowPassage(id, res.win.open);
+  if (res.noise) emitNoise(game, res.noise.x, res.noise.z, res.noise.radius, res.noise.severity);
+  if (res.info) revealPhoneInfo(game);
+  if (res.seat) {
+    if (res.seat.seated) {
+      // un solo posto occupato: libera gli altri
+      for (const d of Object.values(game.interactables)) {
+        if (d.kind === 'furniture' && d.id !== id && d.state === 'seated') {
+          d.state = 'free'; sync(d.id);
+        }
+      }
+      game.player.seated = id;
+    } else {
+      game.player.seated = null;
+    }
+  }
+  return res;
+}
+
+// Alzarsi (movimento o E a vuoto): stato + mesh coerenti.
+export function standUp(game) {
+  const id = game.player.seated;
+  game.player.seated = null;
+  if (id && game.interactables[id]) {
+    game.interactables[id].state = 'free';
+    if (game.interactMeshes) syncInteractionMesh(game.interactMeshes.refs, game.interactables, id);
+  }
+  game.hud.toast('🚶 Ti alzi.');
+}
+
+// Il telefono dà una dritta reale: un volto noto in più nel taccuino.
+function revealPhoneInfo(game) {
+  const unknown = game.npcs.filter(n => !(game.pk.npcs[n.id]?.named));
+  if (!unknown.length) return;
+  const pick = unknown[(game.rng.next() * unknown.length) | 0];
+  markIntroduced(game.pk, pick.id);
 }
 
 export async function save(game) {
