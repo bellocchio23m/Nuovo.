@@ -259,10 +259,25 @@ export function identityFor(id, role, colorHint, isPlayer) {
   const amp = 0.88 + rng() * 0.24;
   const phase = (h % 628) / 100; // 0..2π deterministico
   const sway = rng() * Math.PI * 2;
+  // --- S6.1 personalita' di movimento (solo code in coda: i draw sopra restano identici) ---
+  const pers = {
+    stride: 0.85 + rng() * 0.30,      // lunghezza passo
+    armSwing: 0.60 + rng() * 0.70,    // ampiezza oscillazione braccia
+    swayAmp: 0.50 + rng() * 1.00,     // rollio busto
+    headFreq: 0.60 + rng() * 0.90,    // frequenza movimenti testa
+    gestFreq: 0.50 + rng() * 1.00,    // frequenza gesti conversazione
+    idleStill: rng(),                 // <0.35 fermo, >0.75 irrequieto
+    posture: (rng() - 0.5) * 2,       // -1..1 portamento base busto
+    shoulderT: 0.80 + rng() * 0.50,   // tensione/apertura spalle a riposo
+    blinkRate: 0.70 + rng() * 0.80,   // frequenza ammiccamento
+    talkStyle: Math.floor(rng() * 4), // variante gestualita' conversazione 0..3
+    gazeSide: rng() < 0.5 ? -1 : 1,   // lato preferito degli sguardi
+    turn: 0.70 + rng() * 0.60,        // prontezza piega in curva
+  };
   return {
     id, role, female, age, H, build, skin, hairStyle, hairColor, beard,
     faceVariant, jawW, cheek, eyeDeep, outfit, top, bottom, shoes,
-    glasses, hat, freq, amp, phase, sway, colorHint
+    glasses, hat, freq, amp, phase, sway, pers, colorHint
   };
 }
 
@@ -808,6 +823,7 @@ export function makeHumanoid(color, isPlayer, role, npc) {
   const nose = mesh(GEO.nose, skin);
   headG.add(nose);
   const mouth = mesh(GEO.mouth, flatMat(0x6e3a30));
+  mouth.scale.x = 0.88 + (fnv1a(id + '|mouth') % 100) / 100 * 0.28; // 0.88..1.16
   headG.add(mouth);
   const ears = mesh(GEO.ear, skin);
   headG.add(ears);
@@ -883,15 +899,21 @@ export function makeHumanoid(color, isPlayer, role, npc) {
   // compat: il vecchio codice muoveva legL/legR/armL/armR
   g.userData.limbs = { legL: legL.hip, legR: legR.hip, armL: armL.pivot, armR: armR.pivot, phase: spec.phase };
   g.userData.human = {
-    spec, rig, hips, torsoG, neckG, headG, eyeW, pupils, brows,
+    spec, rig, hips, torsoG, neckG, headG, eyeW, pupils, brows, mouth,
     armL: armL.pivot, armR: armR.pivot, handL: armL.handG, handR: armR.handG,
     thighL: legL.hip, thighR: legR.hip, kneeL: legL.knee, kneeR: legR.knee,
     torso, skull,
+    role: roleBodyLanguage(spec.outfit),
     far: [pupils, brows, mouth, ears, glassesM, capBadge].filter(Boolean),
     mid: [],
     phase: spec.phase, freq: spec.freq, amp: spec.amp, sway: spec.sway,
-    dispSpeed: 0, lastYaw: 0, blinkAt: 2 + (spec.phase % 3), lodTick: (fnv1a(id) % 8),
+    dispSpeed: 0, lastYaw: 0, blinkAt: 2 + (spec.phase % 3), blinkN: 0, lodTick: (fnv1a(id) % 8),
     talkSeed: spec.phase, k, H,
+    // S6.1: pesi di modalita' (transizioni interpolate), schedule idle, saccadi
+    wTalk: 0, wAlert: 0, wAtk: 0, sitW: 0,
+    idleNext: 0, idleCount: 0, idleB: { kind: 0, t0: -99, dur: 1 },
+    gaze: { yaw: 0, pitch: 0, tyaw: 0, tpitch: 0, until: 0, n: 0 },
+    _pose: null, // riusato ogni frame: zero allocazioni a caldo
   };
   return g;
 }
@@ -906,9 +928,42 @@ function ageSleeveShort(spec) {
 }
 
 // ---------------------------------------------------------------------------
+// S6.1: linguaggio del corpo per ruolo (differenze volutamente sottili).
+// ---------------------------------------------------------------------------
+const ROLE_BODY = {
+  police: { posture: -0.030, armSwing: 0.80, sway: 0.85, gest: 0.70, head: 0.90, shoulder: 0.90, stride: 1.00, freqM: 1.00 },
+  worker: { posture: 0.020, armSwing: 1.00, sway: 1.15, gest: 1.00, head: 1.00, shoulder: 1.05, stride: 1.00, freqM: 1.00 },
+  business: { posture: -0.025, armSwing: 0.72, sway: 0.80, gest: 0.60, head: 0.85, shoulder: 0.90, stride: 0.95, freqM: 1.00 },
+  bar: { posture: 0.010, armSwing: 1.00, sway: 1.05, gest: 1.25, head: 1.10, shoulder: 1.00, stride: 1.00, freqM: 1.00 },
+  elder: { posture: 0.020, armSwing: 0.70, sway: 0.90, gest: 0.80, head: 0.80, shoulder: 0.95, stride: 0.78, freqM: 0.85 },
+  street: { posture: 0.000, armSwing: 1.05, sway: 1.10, gest: 1.10, head: 1.10, shoulder: 1.05, stride: 1.00, freqM: 1.00 },
+  target: { posture: -0.010, armSwing: 0.90, sway: 0.90, gest: 0.90, head: 1.30, shoulder: 1.00, stride: 1.00, freqM: 1.02 },
+  guard: { posture: -0.020, armSwing: 0.85, sway: 0.90, gest: 0.80, head: 1.00, shoulder: 0.95, stride: 1.00, freqM: 1.00 },
+  casual: { posture: 0.000, armSwing: 1.00, sway: 1.00, gest: 1.00, head: 1.00, shoulder: 1.00, stride: 1.00, freqM: 1.00 },
+};
+function roleBodyLanguage(outfit) {
+  if (outfit === 'police') return ROLE_BODY.police;
+  if (outfit === 'worker' || outfit === 'worker_casual') return ROLE_BODY.worker;
+  if (outfit === 'business') return ROLE_BODY.business;
+  if (outfit === 'bar') return ROLE_BODY.bar;
+  if (outfit === 'elder') return ROLE_BODY.elder;
+  if (outfit === 'street' || outfit === 'player') return ROLE_BODY.street;
+  if (outfit === 'target') return ROLE_BODY.target;
+  if (outfit === 'guard') return ROLE_BODY.guard;
+  return ROLE_BODY.casual; // casual, casual2
+}
+
+function hash01(s) { return fnv1a(String(s)) / 4294967296; }
+function clampN(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function sstep01(x) { x = x < 0 ? 0 : (x > 1 ? 1 : x); return x * x * (3 - 2 * x); }
+function mixN(a, b, w) { return a + (b - a) * w; }
+
+// ---------------------------------------------------------------------------
 // 7. Animazioni procedurali sul rig (aggancio alla locomotion esistente)
 //    game.js passa speed (m/s dalla sim), t (secondi di sim), attacking,
-//    extra {talk, alert, crouch}. Niente cinematica: tutto deriva dallo stato.
+//    extra {talk, alert, crouch, sitBlend?}. Niente cinematica: tutto deriva
+//    dallo stato. S6.1: personalita' individuale, pesi di transizione,
+//    idle a micro-comportamenti, saccadi, 4 stili conversazione, posa SIT.
 // ---------------------------------------------------------------------------
 export function animateHumanoid(g, speed, t, attacking, extra) {
   const Hd = g.userData.human;
@@ -916,18 +971,26 @@ export function animateHumanoid(g, speed, t, attacking, extra) {
   if (!Hd || !L) return;
   extra = extra || {};
   Hd.lodTick++;
-  // velocita' esibita (smorza stop/partenze: niente scatti)
-  const target = Math.max(0, speed || 0);
-  Hd.dispSpeed += (target - Hd.dispSpeed) * 0.18;
+  const spec = Hd.spec, P = spec.pers, R = Hd.role;
+  // --- input sanificati (mai NaN nella gerarchia) ---
+  const spd = Number.isFinite(speed) ? Math.max(0, speed) : 0;
+  if (!Number.isFinite(t)) t = 0;
+  if (!Number.isFinite(Hd.phase)) Hd.phase = spec.phase;
+  Hd.dispSpeed += (spd - Hd.dispSpeed) * 0.18;
   const v = Hd.dispSpeed;
   const run = Math.min(1, v / 3);
   const walking = Math.min(1, v / 0.4);
-  Hd.phase += (1.6 + v * 2.6) * 0.055 * Hd.freq;
-  const sw = Math.sin(Hd.phase) * (0.62 * walking + 0.18 * run) * Hd.amp;
-  const sw2 = Math.sin(Hd.phase + Math.PI) * (0.62 * walking + 0.18 * run) * Hd.amp;
-
+  Hd.phase += (1.6 + v * 2.6) * 0.055 * Hd.freq * R.freqM;
   const crouch = !!extra.crouch;
-  const alert = !!extra.alert;
+
+  // --- pesi di modalita': le transizioni sono interpolate, mai snap ---
+  const wantTalk = extra.talk ? 1 : 0, wantAlert = extra.alert ? 1 : 0;
+  const wantAtk = attacking ? 1 : 0;
+  Hd.wTalk += (wantTalk - Hd.wTalk) * 0.15;
+  Hd.wAlert += (wantAlert - Hd.wAlert) * 0.12;
+  Hd.wAtk += (wantAtk - Hd.wAtk) * (wantAtk ? 0.40 : 0.18);
+  const sitTarget = clampN(Number(extra.sitBlend) || 0, 0, 1);
+  Hd.sitW += (sitTarget - Hd.sitW) * 0.12;
 
   if (crouch) {
     // accosciata reale: anche, ginocchia, busto (niente scale.y che deforma)
@@ -938,64 +1001,183 @@ export function animateHumanoid(g, speed, t, attacking, extra) {
     Hd.armL.rotation.x = -0.5; Hd.armR.rotation.x = -0.5;
     Hd.headG.rotation.x = -0.25;
   } else {
-    Hd.rig.position.y = Math.abs(Math.sin(Hd.phase)) * 0.035 * walking; // rimbalzo passo
-    // gambe alternate + ginocchio che piega in fase di richiamo
-    Hd.thighL.rotation.x = sw; Hd.thighR.rotation.x = sw2;
-    Hd.kneeL.rotation.x = Math.max(0, -Math.sin(Hd.phase - 0.6)) * (0.9 * walking + 0.5 * run) + 0.06;
-    Hd.kneeR.rotation.x = Math.max(0, -Math.sin(Hd.phase + Math.PI - 0.6)) * (0.9 * walking + 0.5 * run) + 0.06;
-    Hd.thighL.rotation.z = 0.02; Hd.thighR.rotation.z = -0.02;
-    // busto: rollio + contro-rotazione + piega in avanti con la velocita'
-    Hd.torsoG.rotation.y = -sw * 0.14;
-    Hd.torsoG.rotation.z = Math.sin(Hd.phase) * 0.035 * walking + Math.sin(t * 0.9 + Hd.sway) * 0.012 * (1 - walking);
-    Hd.torsoG.rotation.x = (Hd.spec.age === 'elder' ? 0.07 : 0.02) + run * 0.16 + walking * 0.04;
-    // braccia opposte alle gambe + apertura d'allerta
-    if (attacking) {
-      Hd.armR.rotation.x = -2.3; Hd.armR.rotation.z = 0.5;
-      Hd.armL.rotation.x = 0.4; Hd.armL.rotation.z = -0.35;
-      Hd.torsoG.rotation.y = -0.3;
-    } else if (alert) {
-      Hd.armL.rotation.x = -sw * 0.5; Hd.armR.rotation.x = sw * 0.5;
-      Hd.armL.rotation.z = -0.55; Hd.armR.rotation.z = 0.55; // braccia semi-alzate
-      Hd.headG.rotation.x = -0.06;
-    } else if (extra.talk) {
-      // conversazione: cenni del capo + gesticolazione leggera (de-sincronizzata)
-      const gt = Math.sin(t * 3.1 + Hd.talkSeed * 3);
-      Hd.armR.rotation.x = -0.55 + gt * 0.22 * Hd.amp;
-      Hd.armR.rotation.z = 0.35;
-      Hd.armL.rotation.x = -0.15 + Math.sin(t * 2.3 + Hd.talkSeed) * 0.08;
-      Hd.armL.rotation.z = -0.15;
-      Hd.headG.rotation.x = 0.05 + Math.sin(t * 2.6 + Hd.talkSeed * 2) * 0.045;
-    } else {
-      Hd.armL.rotation.x = -sw2 * 0.75; Hd.armR.rotation.x = -sw * 0.75;
-      Hd.armL.rotation.z = -0.07 - walking * 0.03; Hd.armR.rotation.z = 0.07 + walking * 0.03;
-      Hd.armL.rotation.x += Math.sin(t * 1.7 + Hd.sway) * 0.02 * (1 - walking); // respiro
-      Hd.armR.rotation.x += Math.sin(t * 1.7 + Hd.sway + 1) * 0.02 * (1 - walking);
-      // idle: spostamento del peso + testa che osserva (mai statue)
-      Hd.hips.position.x = Math.sin(t * 0.55 + Hd.sway) * 0.018 * (1 - walking);
-      Hd.headG.rotation.y = Math.sin(t * 0.42 + Hd.sway * 2) * 0.16 * (1 - walking);
-      Hd.headG.rotation.x = Math.sin(t * 1.7 + Hd.sway) * 0.02 * (1 - walking);
+    // --- posa base: ciclo passo continuo (fase+ampiezza continue, nessuno snap) ---
+    const stride = P.stride * R.stride;
+    const sw = Math.sin(Hd.phase) * (0.62 * walking + 0.18 * run) * Hd.amp * stride;
+    const sw2 = Math.sin(Hd.phase + Math.PI) * (0.62 * walking + 0.18 * run) * Hd.amp * stride;
+    const armAmp = P.armSwing * R.armSwing * Hd.amp;
+    let rigY = Math.abs(Math.sin(Hd.phase)) * 0.035 * walking; // rimbalzo passo
+    let thLx = sw, thRx = sw2;
+    let knLx = Math.max(0, -Math.sin(Hd.phase - 0.6)) * (0.9 * walking + 0.5 * run) + 0.06;
+    let knRx = Math.max(0, -Math.sin(Hd.phase + Math.PI - 0.6)) * (0.9 * walking + 0.5 * run) + 0.06;
+    const shRest = 0.07 * P.shoulderT * R.shoulder;
+    let armLx = -sw2 * 0.75 * armAmp, armRx = -sw * 0.75 * armAmp;
+    let armLz = -shRest - walking * 0.03, armRz = shRest + walking * 0.03;
+    armLx += Math.sin(t * 1.7 + Hd.sway) * 0.02 * (1 - walking); // respiro
+    armRx += Math.sin(t * 1.7 + Hd.sway + 1) * 0.02 * (1 - walking);
+    let toX = (spec.age === 'elder' ? 0.07 : 0.02) + run * 0.16 + walking * 0.04
+      + R.posture + P.posture * 0.015;
+    let toY = -sw * 0.14;
+    let toZ = Math.sin(Hd.phase) * 0.035 * walking * P.swayAmp * R.sway
+      + Math.sin(t * 0.9 * P.headFreq + Hd.sway) * 0.012 * (1 - walking);
+    let hipsX = Math.sin(t * 0.55 + Hd.sway) * 0.018 * (1 - walking);
+    let heX = Math.sin(t * 1.7 + Hd.sway) * 0.02 * (1 - walking);
+    let heY = 0, heZ = 0;
+
+    // --- sguardo a saccadi: bersagli discreti, mai sinusoide robotica ---
+    const Gz = Hd.gaze;
+    if (t >= Gz.until) {
+      Gz.n++;
+      const gid = spec.id;
+      const gAmp = v > 0.5 ? 0.16 : (Hd.wAlert > 0.5 ? 0.65 : 0.42);
+      const side = (hash01(gid + '|gs' + Gz.n) < 0.68 ? P.gazeSide : -P.gazeSide);
+      Gz.tyaw = side * (0.12 + hash01(gid + '|gy' + Gz.n) * gAmp) * R.head;
+      Gz.tpitch = (hash01(gid + '|gp' + Gz.n) - 0.42) * 0.28;
+      const gap = v > 0.5 ? 1.2 + hash01(gid + '|gg' + Gz.n) * 2.0
+        : Hd.wAlert > 0.5 ? 0.7 + hash01(gid + '|gg' + Gz.n) * 1.2
+        : (1.8 + hash01(gid + '|gg' + Gz.n) * 4.0) / (0.6 + P.headFreq * 0.6);
+      Gz.until = t + gap;
     }
-    // mani: leggera contro-rotazione naturale
-    Hd.handL.rotation.x = -Hd.armL.rotation.x * 0.35;
-    Hd.handR.rotation.x = -Hd.armR.rotation.x * 0.35;
-    // piega in curva: rollio verso l'interno della svolta (yaw dalla sim)
+    const gRate = Hd.wAlert > 0.5 ? 0.35 : 0.28;
+    Gz.yaw += (Gz.tyaw - Gz.yaw) * gRate;
+    Gz.pitch += (Gz.tpitch - Gz.pitch) * gRate;
+    heY = Gz.yaw * (walking > 0.5 ? 0.45 : 1);
+    heX += Gz.pitch * 0.8;
+    Hd.pupils.position.x = clampN(Gz.yaw * 0.005, -0.004, 0.004);
+
+    // --- idle: schedule deterministico (quiete vs irrequietezza) ---
+    const idleNow = walking < 0.05 && Hd.wTalk < 0.15 && Hd.wAlert < 0.15 && !attacking && Hd.sitW < 0.1;
+    if (idleNow && t >= Hd.idleNext) {
+      Hd.idleCount++;
+      const c = Hd.idleCount, cid = spec.id;
+      const r = hash01(cid + '|i' + c), r2 = hash01(cid + '|ib' + c);
+      let kind;
+      if (r < 0.22 + P.idleStill * 0.48) kind = 0; // fermo
+      else kind = 1 + (Math.floor(r2 * 9.999) % 9); // 1..9 micro-comportamenti
+      const dur = kind === 0 ? 2 + r2 * 4 : 0.8 + r2 * 1.8;
+      Hd.idleB = { kind, t0: t, dur, dir: hash01(cid + '|id' + c) < 0.5 ? -1 : 1 };
+      Hd.idleNext = t + dur + 0.3 + hash01(cid + '|ig' + c) * (P.idleStill > 0.6 ? 5.0 : 2.5);
+    }
+    const ib = Hd.idleB;
+    let ibW = 0;
+    if (idleNow && ib.kind !== 0 && t >= ib.t0) {
+      const f = (t - ib.t0) / ib.dur;
+      if (f < 1) ibW = sstep01(f / 0.22) * (1 - sstep01((f - 0.78) / 0.22));
+    }
+    if (ibW > 0.001) {
+      const d = ib.dir, e = ibW;
+      switch (ib.kind) {
+        case 1: toZ += 0.045 * e * d; hipsX += 0.022 * e * d; break; // sposta il peso
+        case 2: heY += 0.55 * e * d; break;                          // guarda di lato
+        case 3: heX -= 0.13 * e; break;                               // guarda in alto
+        case 4: armLz -= 0.14 * e; armRz += 0.14 * e; toX -= 0.02 * e; break; // spalle
+        case 5: armRx = mixN(armRx, -1.12, e); heX += 0.09 * e; heZ += 0.07 * e; break; // mano al volto
+        case 6: armLx = mixN(armLx, -0.92, e); heX += 0.24 * e; break; // controlla il polso
+        case 7: armLx = mixN(armLx, -0.38, e); armRx = mixN(armRx, -0.38, e); toX += 0.05 * e; break; // vestiti
+        case 8: armLz -= 0.30 * e; armRz += 0.30 * e; toX -= 0.05 * e; heX -= 0.09 * e; break; // stiracchia
+        default: heY += 0.95 * e * d; toY += 0.18 * e * d; break; // occhiata dietro
+      }
+    }
+
+    // --- conversazione: 4 stili de-sincronizzati ---
+    const gf = (1.6 + P.gestFreq * 1.6) * R.gest;
+    const ts = P.talkStyle;
+    let tkLx = -0.15, tkLz = -0.15, tkRx = -0.5, tkRz = 0.32, tkHX = 0.05, tkHY = 0, tkHZ = 0;
+    if (ts === 0) { // gesticolatore
+      const gg = Math.sin(t * 1.55 * gf + Hd.talkSeed * 3);
+      tkRx = -0.55 + gg * 0.24; tkRz = 0.38;
+      tkLx = -0.18 + Math.sin(t * 1.15 * gf + Hd.talkSeed) * 0.10; tkLz = -0.18;
+      tkHX = 0.05 + Math.sin(t * 2.6 + Hd.talkSeed * 2) * 0.045;
+    } else if (ts === 1) { // annuitore
+      tkRx = -0.22; tkRz = 0.12; tkLx = -0.22; tkLz = -0.12;
+      tkHX = 0.06 + Math.max(0, Math.sin(t * 1.7 * gf + Hd.talkSeed)) * 0.09;
+    } else if (ts === 2) { // pacato, quasi conserte
+      tkLx = -0.30; tkLz = -0.30; tkRx = -0.30; tkRz = 0.30;
+      tkHZ = 0.09; tkHX = 0.03;
+      tkHY = Math.sin(t * 1.1 + Hd.talkSeed) * 0.06;
+    } else { // indica a impulsi
+      const pp = Math.max(0, Math.sin(t * 0.95 * gf + Hd.talkSeed * 2));
+      tkRx = -0.35 - pp * pp * 0.75; tkRz = 0.22;
+      tkHY = Math.sin(t * 1.4 + Hd.talkSeed) * 0.10; tkHX = 0.02 + pp * 0.03;
+    }
+    if (Hd.wTalk > 0.001) {
+      const w = Hd.wTalk;
+      armLx = mixN(armLx, tkLx, w); armLz = mixN(armLz, tkLz, w);
+      armRx = mixN(armRx, tkRx, w); armRz = mixN(armRz, tkRz, w);
+      heX = mixN(heX, tkHX, w); heY = mixN(heY, tkHY, w); heZ = mixN(heZ, tkHZ, w);
+      toX = mixN(toX, 0.04 + R.posture, w);
+      rigY *= (1 - w * 0.9);
+    }
+    // --- allerta: scansione con lo sguardo, braccia semi-alzate ---
+    if (Hd.wAlert > 0.001) {
+      const w = Hd.wAlert;
+      armLx = mixN(armLx, -sw * 0.5 * armAmp, w); armRx = mixN(armRx, sw * 0.5 * armAmp, w);
+      armLz = mixN(armLz, -0.55, w); armRz = mixN(armRz, 0.55, w);
+      heX = mixN(heX, -0.06, w); heY = mixN(heY, Gz.yaw * 1.2, w);
+      toX = mixN(toX, 0.06 + R.posture, w);
+    }
+    // --- attacco: entrata rapida, uscita smorzata ---
+    if (Hd.wAtk > 0.001) {
+      const w = Hd.wAtk;
+      armRx = mixN(armRx, -2.3, w); armRz = mixN(armRz, 0.5, w);
+      armLx = mixN(armLx, 0.4, w); armLz = mixN(armLz, -0.35, w);
+      toY = mixN(toY, -0.3, w);
+    }
+    // --- S6.1 SIT: capacita' di posa (nessun mobile, solo il corpo) ---
+    if (Hd.sitW > 0.001) {
+      const s = Hd.sitW;
+      thLx = mixN(thLx, -1.45, s); thRx = mixN(thRx, -1.45, s);
+      knLx = mixN(knLx, 1.52, s); knRx = mixN(knRx, 1.52, s);
+      rigY = mixN(rigY, -0.385 * Hd.k, s);
+      toX = mixN(toX, 0.06 + R.posture * 0.5, s);
+      armLx = mixN(armLx, -0.25, s); armRx = mixN(armRx, -0.25, s);
+      armLz = mixN(armLz, -0.12, s); armRz = mixN(armRz, 0.12, s);
+      heX = mixN(heX, 0.02, s); heY = mixN(heY, Gz.yaw * 0.6, s);
+    }
+
+    // --- piega in curva con prontezza individuale ---
     const yaw = g.rotation.y || 0;
     let dy = yaw - Hd.lastYaw;
     while (dy > Math.PI) dy -= 2 * Math.PI;
     while (dy < -Math.PI) dy += 2 * Math.PI;
     Hd.lastYaw = yaw;
-    Hd.lean = (Hd.lean ?? 0) * 0.9 + Math.max(-0.2, Math.min(0.2, dy * 3)) * 0.1;
-    Hd.torsoG.rotation.z += Hd.lean;
+    Hd.lean = (Hd.lean ?? 0) * 0.9 + clampN(dy * 3 * P.turn, -0.2, 0.2) * 0.1;
+
+    // --- applicazione con clamp anatomici (niente dislocazioni) ---
+    Hd.rig.position.y = rigY;
+    Hd.thighL.rotation.x = clampN(thLx, -1.7, 1.0);
+    Hd.thighR.rotation.x = clampN(thRx, -1.7, 1.0);
+    Hd.kneeL.rotation.x = clampN(knLx, 0, 2.2);
+    Hd.kneeR.rotation.x = clampN(knRx, 0, 2.2);
+    Hd.thighL.rotation.z = 0.02; Hd.thighR.rotation.z = -0.02;
+    Hd.torsoG.rotation.x = clampN(toX, -0.3, 0.6);
+    Hd.torsoG.rotation.y = clampN(toY, -0.6, 0.6);
+    Hd.torsoG.rotation.z = clampN(toZ + Hd.lean, -0.35, 0.35);
+    Hd.armL.rotation.x = clampN(armLx, -2.6, 0.9);
+    Hd.armR.rotation.x = clampN(armRx, -2.6, 0.9);
+    Hd.armL.rotation.z = clampN(armLz, -1.1, 1.1);
+    Hd.armR.rotation.z = clampN(armRz, -1.1, 1.1);
+    Hd.headG.rotation.y = clampN(heY, -1.05, 1.05);
+    Hd.headG.rotation.x = clampN(heX, -0.5, 0.5);
+    Hd.headG.rotation.z = clampN(heZ, -0.3, 0.3);
+    Hd.hips.position.x = clampN(hipsX, -0.06, 0.06);
+    // mani: leggera contro-rotazione naturale
+    Hd.handL.rotation.x = -Hd.armL.rotation.x * 0.35;
+    Hd.handR.rotation.x = -Hd.armR.rotation.x * 0.35;
   }
 
-  // ammiccamento: scala occhi a fessura ogni 2-5s (de-sincronizzato per NPC)
-  if (t > Hd.blinkAt) {
-    Hd.blinkAt = t + 1.8 + ((Hd.phase * 7) % 3.2);
-    Hd.blinkUntil = t + 0.12;
+  // ammiccamento S6.1: ritmo e durata individuali, mai sincronizzato
+  if (t >= Hd.blinkAt) {
+    Hd.blinkN++;
+    Hd.blinkAt = t + (2.0 + hash01(spec.id + '|bl' + Hd.blinkN) * 3.4) / (0.5 + P.blinkRate);
+    Hd.blinkUntil = t + 0.09 + hash01(spec.id + '|bd' + Hd.blinkN) * 0.07;
   }
   const blink = t < (Hd.blinkUntil ?? -1) ? 0.12 : 1;
-  Hd.eyeW.scale.y = blink;
-  Hd.pupils.scale.y = blink;
+  Hd.eyeW.scale.y = blink * (1 + Hd.wAlert * 0.10); // allerta: occhi piu' aperti
+  Hd.pupils.scale.y = blink * (1 + Hd.wAlert * 0.10);
+  Hd.brows.position.y = Hd.wAlert * 0.005; // sopracciglia alzate in allerta
+  // conversazione: movimento sottile della bocca
+  Hd.mouth.scale.y = 1 + Hd.wTalk * 0.38 * (0.5 + 0.5 * Math.sin(t * 8.0 + Hd.talkSeed * 5));
 
   // LOD proporzionato alla distanza (a scatti sfalsati: ~1 NPC su 8 per frame)
   if (activeCamera && (Hd.lodTick % 8 === 0)) {
