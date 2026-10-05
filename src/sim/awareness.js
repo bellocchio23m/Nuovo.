@@ -44,8 +44,18 @@ export function awarenessTick(sim, player, dt) {
   }
 }
 
+const HABIT_S = 120;         // stessa presenza: non ri-notare prima di 120s
+
 function learnSpot(sim, n, player, d, sp) {
   const place = nearestNode(player.x, player.z);
+  // Abitudine: se ho già una credenza recente sulla stessa presenza, non
+  // proliferare bucket temporali. Senza questo, stimoli persistenti (player
+  // fermo vicino) generano un evId nuovo ogni 10s; ognuno riattiva curious e
+  // l'agenda non avanza mai (stallo routine). La credenza esistente resta e
+  // decade normalmente; riesamino solo quando è vecchia.
+  for (const b of n.beliefs.values()) {
+    if (b.kind === 'suspicion' && b.place === place && (sim.t - b.t) < HABIT_S) return;
+  }
   const evId = `spot-${place}-${Math.floor(sim.t / BUCKET_S)}`;
   const noise = 0.4 + (d / 22) * 1.6;
   const ex = (sim.rng.next() + sim.rng.next() - 1) * noise;
